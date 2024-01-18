@@ -31,7 +31,7 @@ def parse_kml_file(kml_file):
 
 # Example usage
 if __name__ == "__main__":
-    kml_file = "your_kml_file.kml"
+    kml_file = "/home/steve/Documents/OpenTelecomData/kml2ofds/data/MTN-Ghana-FOB-export.kml"
     point_data, line_data = parse_kml_file(kml_file)
 
     print("Points:")
