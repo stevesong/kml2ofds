@@ -196,27 +196,16 @@ if __name__ == "__main__":
 
     # Define the Africa Sinusoidal projection
     africa_sinusoidal_proj = pyproj.Proj('+proj=sinu +lon_0=15 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs')
-  
-    kml_filename = (
-        "/home/steve/Documents/OpenTelecomData/kml2ofds/input/MTN-Ghana-FOB-export.kml"
-    )
-    points_geojson_file = (
-        "/home/steve/Documents/OpenTelecomData/kml2ofds/output/points.geojson"
-    )
-    polylines_geojson_file = (
-        "/home/steve/Documents/OpenTelecomData/kml2ofds/output/polylines.geojson"
-    )
+    
+    kml_filename = "input/MTN-Ghana-FOB-export.kml"
 
-    points_geojson_af_sin_file = (
-        "/home/steve/Documents/OpenTelecomData/kml2ofds/output/points-afsin.geojson"
-    )
-    polylines_geojson_af_sin_file = (
-        "/home/steve/Documents/OpenTelecomData/kml2ofds/output/polylines-afsin.geojson"
-    )
+    points_geojson_file = "output/points.geojson"
+    polylines_geojson_file = "output/polylines.geojson"
 
-    ofds_polylines_geojson_file = (
-        "/home/steve/Documents/OpenTelecomData/kml2ofds/output/ofds-polylines.geojson"
-    )
+    points_geojson_af_sin_file = "output/points-afsin.geojson"
+    polylines_geojson_af_sin_file = "output/polylines-afsin.geojson"
+
+    ofds_polylines_geojson_file = "output/ofds-polylines.geojson"
 
     selected_level = choose_folder_level(kml_filename)
 
