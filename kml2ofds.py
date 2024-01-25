@@ -5,6 +5,7 @@ from shapely.geometry import Point, LineString, shape, mapping
 from shapely.ops import split, nearest_points
 from functools import partial
 import pyproj
+from pyproj import Transformer
 from shapely.ops import transform
 
 
@@ -104,7 +105,14 @@ def process_folders(filename, selected_level, points_geojson_file, polylines_geo
 
 def apply_africa_sinusoidal_projection(points_file, polylines_file, output_points_file, output_polylines_file):
     # Define the Africa Sinusoidal projection
-    africa_sinusoidal_proj = pyproj.Proj('+proj=sinu +lon_0=15 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs')
+    africa_sinusoidal_proj = pyproj.Proj('+proj=sinu +lon_0=15 +x_0=0 +y_0=0 +a=6378137 +b=6378137 +units=m +no_defs')
+
+    # For the transformation, use CRS objects. The source is EPSG:4326.
+    source_crs = pyproj.CRS("epsg:4326")  # Geographic coordinate system WGS 84
+    target_crs = pyproj.CRS(africa_sinusoidal_proj.srs)  # Target CRS from the custom projection
+
+    # Create a Transformer object for converting from source_crs to target_crs
+    transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
 
     # Load GeoJSON files
     points_data = load_geojson(points_file)
@@ -113,21 +121,37 @@ def apply_africa_sinusoidal_projection(points_file, polylines_file, output_point
     # Transform points
     for feature in points_data['features']:
         point = shape(feature['geometry'])
-        transformed_point = transform_geometry(point, africa_sinusoidal_proj)
+        # Extract x and y coordinates (longitude and latitude) from the point
+        x, y = point.x, point.y
+
+        # Use the transformer to transform the coordinates
+        transformed_x, transformed_y = transformer.transform(x, y)
+
+        # Create a new Shapely Point with the transformed coordinates
+        transformed_point = Point(transformed_x, transformed_y)
         feature['geometry'] = mapping(transformed_point)
 
     # Transform polylines
     for feature in polylines_data['features']:
         polyline = shape(feature['geometry'])
-        transformed_polyline = transform_geometry(polyline, africa_sinusoidal_proj)
+        # List to hold the transformed points
+        transformed_points = []
+
+        # Iterate over each point in the polyline
+        for x, y in polyline.coords:
+            # Transform each point and add it to the list of transformed points
+            transformed_x, transformed_y = transformer.transform(x, y)
+            transformed_points.append((transformed_x, transformed_y))
+
+        # Create a new LineString from the transformed points
+        transformed_polyline = LineString(transformed_points)
         feature['geometry'] = mapping(transformed_polyline)
 
     # Save the transformed geometries back to new GeoJSON files
     save_geojson(points_data, output_points_file)
     save_geojson(polylines_data, output_polylines_file)
 
-
-def split_polylines(points_file, polylines_file, output_file, distance_threshold=500):
+def split_polylines(points_file, polylines_file, output_file, distance_threshold=100):
     # Load GeoJSON files
     with open(polylines_file, 'r') as file:
         polylines_data = json.load(file)
@@ -140,9 +164,11 @@ def split_polylines(points_file, polylines_file, output_file, distance_threshold
         polyline = shape(feature['geometry'])
         for point_feature in points_data['features']:
             point = shape(point_feature['geometry'])
-            print(f"Processing point: {point}")
+            # print(f"Processing point: {point}  Distance: {point.distance(polyline)}")
             
             if point.distance(polyline) <= distance_threshold:
+                print(f"Found point: {point}  Distance: {point.distance(polyline)}")
+
                 # Find the nearest point on the polyline to our point
                 nearest = nearest_points(point, polyline)[1]
                 
@@ -184,18 +210,12 @@ def save_geojson(data, filename):
     with open(filename, 'w') as file:
         json.dump(data, file)
 
-def transform_geometry(geometry, projection):
-    proj_transform = partial(pyproj.transform, pyproj.Proj(init='epsg:4326'), projection)
-    return transform(proj_transform, geometry)
 
 
 # main
 if __name__ == "__main__":
     # set defaults
     max_distance = 500 # meters
-
-    # Define the Africa Sinusoidal projection
-    africa_sinusoidal_proj = pyproj.Proj('+proj=sinu +lon_0=15 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs')
     
     kml_filename = "input/MTN-Ghana-FOB-export.kml"
 
