@@ -1,12 +1,10 @@
 from pykml import parser
 import inquirer 
 import json
-from shapely.geometry import Point, LineString, shape, mapping
+from shapely.geometry import MultiPolygon
 from shapely.ops import split, nearest_points
-from functools import partial
-import pyproj
-from pyproj import Transformer
-from shapely.ops import transform
+import geopandas as gpd
+import uuid
 
 
 # See how deep the folder hierarchy goes
@@ -101,106 +99,26 @@ def process_folders(filename, selected_level, points_geojson_file, polylines_geo
         with open(geojson_file, "w") as output:
             json.dump({"type": "FeatureCollection", "features": features}, output, indent=2, default=str)
 
-    return points, polylines
+    # return points, polylines
 
-def apply_africa_sinusoidal_projection(points_file, polylines_file, output_points_file, output_polylines_file):
-    # Define the Africa Sinusoidal projection
-    africa_sinusoidal_proj = pyproj.Proj('+proj=sinu +lon_0=15 +x_0=0 +y_0=0 +a=6378137 +b=6378137 +units=m +no_defs')
+# Function to find the nearest line to each point and find the nearest point on that line to the point
+def snap_to_line(point, lines):
+    nearest_line = None
+    min_distance = float('inf')
+    nearest_point_on_line = None
 
-    # For the transformation, use CRS objects. The source is EPSG:4326.
-    source_crs = pyproj.CRS("epsg:4326")  # Geographic coordinate system WGS 84
-    target_crs = pyproj.CRS(africa_sinusoidal_proj.srs)  # Target CRS from the custom projection
+    # Iterate over all lines to find the nearest one
+    for line in lines.geometry:
+        # Use nearest_points to get the nearest point on the line to our point
+        point_on_line = nearest_points(point, line)[1]
+        distance = point.distance(point_on_line)
 
-    # Create a Transformer object for converting from source_crs to target_crs
-    transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+        if distance < min_distance:
+            min_distance = distance
+            nearest_line = line
+            nearest_point_on_line = point_on_line
 
-    # Load GeoJSON files
-    points_data = load_geojson(points_file)
-    polylines_data = load_geojson(polylines_file)
-
-    # Transform points
-    for feature in points_data['features']:
-        point = shape(feature['geometry'])
-        # Extract x and y coordinates (longitude and latitude) from the point
-        x, y = point.x, point.y
-
-        # Use the transformer to transform the coordinates
-        transformed_x, transformed_y = transformer.transform(x, y)
-
-        # Create a new Shapely Point with the transformed coordinates
-        transformed_point = Point(transformed_x, transformed_y)
-        feature['geometry'] = mapping(transformed_point)
-
-    # Transform polylines
-    for feature in polylines_data['features']:
-        polyline = shape(feature['geometry'])
-        # List to hold the transformed points
-        transformed_points = []
-
-        # Iterate over each point in the polyline
-        for x, y in polyline.coords:
-            # Transform each point and add it to the list of transformed points
-            transformed_x, transformed_y = transformer.transform(x, y)
-            transformed_points.append((transformed_x, transformed_y))
-
-        # Create a new LineString from the transformed points
-        transformed_polyline = LineString(transformed_points)
-        feature['geometry'] = mapping(transformed_polyline)
-
-    # Save the transformed geometries back to new GeoJSON files
-    save_geojson(points_data, output_points_file)
-    save_geojson(polylines_data, output_polylines_file)
-
-def split_polylines(points_file, polylines_file, output_file, distance_threshold=100):
-    # Load GeoJSON files
-    with open(polylines_file, 'r') as file:
-        polylines_data = json.load(file)
-    with open(points_file, 'r') as file:
-        points_data = json.load(file)
-
-    modified_polylines = []
-
-    for feature in polylines_data['features']:
-        polyline = shape(feature['geometry'])
-        for point_feature in points_data['features']:
-            point = shape(point_feature['geometry'])
-            # print(f"Processing point: {point}  Distance: {point.distance(polyline)}")
-            
-            if point.distance(polyline) <= distance_threshold:
-                print(f"Found point: {point}  Distance: {point.distance(polyline)}")
-
-                # Find the nearest point on the polyline to our point
-                nearest = nearest_points(point, polyline)[1]
-                
-                # Create a small line segment (perpendicular to the polyline) to use as splitter
-                # The segment must be small but should cross the polyline
-                splitter = LineString([nearest, nearest.buffer(0.0001).exterior.coords[0]])
-                
-                # Split the line at the nearest point
-                split_line = split(polyline, splitter)
-
-                # Add the split lines to our list
-                for geom in split_line.geoms:
-                    if geom.geom_type == 'LineString':
-                        modified_polylines.append(geom)
-            else:
-                modified_polylines.append(polyline)
-
-    # Convert the modified polylines back to GeoJSON
-    modified_geojson = {"type": "FeatureCollection", "features": []}
-    for line in modified_polylines:
-        feature = {
-            "type": "Feature",
-            "properties": {},
-            "geometry": mapping(line)
-        }
-        modified_geojson['features'].append(feature)
-        
-    # Save the modified polylines to a new GeoJSON file
-    with open(output_file, 'w') as file:
-        json.dump(modified_geojson, file)
-
-
+    return nearest_point_on_line
 
 def load_geojson(filename):
     with open(filename, 'r') as file:
@@ -210,21 +128,12 @@ def save_geojson(data, filename):
     with open(filename, 'w') as file:
         json.dump(data, file)
 
-
-
 # main
 if __name__ == "__main__":
-    # set defaults
-    max_distance = 500 # meters
-    
+            
     kml_filename = "input/MTN-Ghana-FOB-export.kml"
-
     points_geojson_file = "output/points.geojson"
     polylines_geojson_file = "output/polylines.geojson"
-
-    points_geojson_af_sin_file = "output/points-afsin.geojson"
-    polylines_geojson_af_sin_file = "output/polylines-afsin.geojson"
-
     ofds_polylines_geojson_file = "output/ofds-polylines.geojson"
 
     selected_level = choose_folder_level(kml_filename)
@@ -234,7 +143,70 @@ if __name__ == "__main__":
         kml_filename, selected_level, points_geojson_file, polylines_geojson_file
     )
     
-    # convert geojson to africa sinusoidal projection
-    apply_africa_sinusoidal_projection(points_geojson_file, polylines_geojson_file, points_geojson_af_sin_file, polylines_geojson_af_sin_file)
+    # Load the GeoJSON files into GeoDataFrames
+    points_gdf = gpd.read_file("output/points.geojson")
+    lines_gdf = gpd.read_file("output/polylines.geojson")
+    num_lines = len(lines_gdf)
+    print("Number of lines:", num_lines)
+
+    # Ensure CRS match, if not, reproject
+    if points_gdf.crs != lines_gdf.crs:
+        points_gdf = points_gdf.to_crs(lines_gdf.crs)
+        
+    # Apply the snap_to_line function to each point in the points GeoDataFrame
+    snapped_points = points_gdf.geometry.apply(lambda point: snap_to_line(point, lines_gdf))
+    print("Total number of snapped points:", snapped_points.size)
     
-    split_polylines(points_geojson_af_sin_file, polylines_geojson_af_sin_file, ofds_polylines_geojson_file, max_distance)
+    # Create a new GeoDataFrame with the snapped points
+    snapped_points_gdf = gpd.GeoDataFrame(points_gdf.drop(columns='geometry'), geometry=snapped_points, crs=points_gdf.crs)
+
+    # Save the snapped points dataframe to a new GeoJSON file
+    # snapped_points_gdf.to_file('output/snapped_points.geojson', driver='GeoJSON')
+
+    split_lines = []
+    
+    # Iterate over the lines and find the snapped points that intersect each line
+    for idx, line_row in lines_gdf.iterrows():
+        polyline_name = line_row['name']
+        buffered_points = []
+        point_names = []
+        
+        for point_idx, point_row in snapped_points_gdf.iterrows():
+            point = point_row.geometry
+            point_name = point_row['name']
+            buffered_point = point.buffer(1e-5)
+            buffered_points.append(buffered_point)
+            
+            if line_row.geometry.intersects(buffered_point):
+                point_names.append(point_name)  # Capture the name of the intersecting point
+        
+        buffered_area = MultiPolygon(buffered_points)
+        
+        if line_row.geometry.intersects(buffered_area):
+            split_line = split(line_row.geometry, buffered_area)
+            for segment in split_line.geoms:
+                # Create a unique identifier for each line segment
+                segment_uuid = str(uuid.uuid4())
+                # Include both polyline and point names with the geometry
+                split_lines.append((segment_uuid, segment, polyline_name, ", ".join(point_names)))
+        else:
+            # Generate a UUID for the original line if no intersection
+            segment_uuid = str(uuid.uuid4())
+            split_lines.append((segment_uuid, line_row.geometry, polyline_name, ""))
+
+    print("Number of segments found:", len(split_lines))        
+
+    # Create a new GeoDataFrame from the split linestrings
+    split_linestrings_gdf = gpd.GeoDataFrame(split_lines, columns=['uuid', 'geometry', 'polyline_name', 'point_names'], crs=lines_gdf.crs)
+
+    # Set the 'uuid' column as the index of the GeoDataFrame
+    split_linestrings_gdf.set_index('uuid', inplace=True)
+
+    # fig, ax = plt.subplots()
+    # split_linestrings_gdf.plot(ax=ax, color='blue')
+    # snapped_points_gdf.plot(ax=ax, color='red', markersize=5)
+    # plt.show()
+
+    # # Save the split lines to a new GeoJSON file
+    split_linestrings_gdf.to_file(ofds_polylines_geojson_file, driver='GeoJSON')
+    # print(split_linestrings_gdf.head())
