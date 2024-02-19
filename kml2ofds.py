@@ -1,11 +1,31 @@
 from pykml import parser
+import os
 import inquirer 
 import json
 from shapely.geometry import MultiPolygon
 from shapely.ops import split, nearest_points
 import geopandas as gpd
 import uuid
+import random
+import matplotlib
+matplotlib.use('Qt5Agg')  # Choose an appropriate backend
+import matplotlib.pyplot as plt
 
+def list_kml_files(directory):
+    # List all .kml files in the given directory with their full paths.
+    kml_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.kml')]
+    return kml_files
+
+def select_file(files):
+    # Allow the user to select a file from the list.
+    questions = [
+        inquirer.List('file',
+                      message="Select a file",
+                      choices=files,
+                      ),
+    ]
+    answers = inquirer.prompt(questions)
+    return answers['file']
 
 # See how deep the folder hierarchy goes
 def get_folder_levels(folder, level=1):
@@ -128,13 +148,30 @@ def save_geojson(data, filename):
     with open(filename, 'w') as file:
         json.dump(data, file)
 
-# main
-if __name__ == "__main__":
-            
-    kml_filename = "input/MTN-Ghana-FOB-export.kml"
-    points_geojson_file = "output/points.geojson"
-    polylines_geojson_file = "output/polylines.geojson"
-    ofds_polylines_geojson_file = "output/ofds-polylines.geojson"
+# Function to generate a random color
+def random_color():
+    return "#" + ''.join([random.choice('0123456789ABCDEF') for j in range(6)])
+
+def main():
+# Prompt the user for a directory, defaulting to the "input" subdirectory if none is provided.
+    directory = input("Enter the directory path for kml files (leave blank to use the 'input' subdirectory): ").strip()
+    if not directory:
+        directory = os.path.join(os.getcwd(), 'input')
+    
+    kml_files = list_kml_files(directory)
+
+    if not kml_files:
+        print("No .kml files found in the directory.")
+        exit()
+    
+    kml_filename = select_file(kml_files)
+    print(f"\nYou selected: {kml_filename}")
+    
+    # kml_filename = "input/NOFBI_1.kml"        
+    # kml_filename = "input/MTN-Ghana-FOB-export.kml"
+    points_geojson_file = "output/NOFBI-points.geojson"
+    polylines_geojson_file = "output/NOFBI-polylines.geojson"
+    ofds_polylines_geojson_file = "output/NOFBI-ofds-polylines.geojson"
 
     selected_level = choose_folder_level(kml_filename)
 
@@ -144,8 +181,8 @@ if __name__ == "__main__":
     )
     
     # Load the GeoJSON files into GeoDataFrames
-    points_gdf = gpd.read_file("output/points.geojson")
-    lines_gdf = gpd.read_file("output/polylines.geojson")
+    points_gdf = gpd.read_file("output/NOFBI-points.geojson")
+    lines_gdf = gpd.read_file("output/NOFBI-polylines.geojson")
     num_lines = len(lines_gdf)
     print("Number of lines:", num_lines)
 
@@ -161,7 +198,7 @@ if __name__ == "__main__":
     snapped_points_gdf = gpd.GeoDataFrame(points_gdf.drop(columns='geometry'), geometry=snapped_points, crs=points_gdf.crs)
 
     # Save the snapped points dataframe to a new GeoJSON file
-    # snapped_points_gdf.to_file('output/snapped_points.geojson', driver='GeoJSON')
+    snapped_points_gdf.to_file('output/NOFBI-snapped_points.geojson', driver='GeoJSON')
 
     split_lines = []
     
@@ -174,7 +211,7 @@ if __name__ == "__main__":
         for point_idx, point_row in snapped_points_gdf.iterrows():
             point = point_row.geometry
             point_name = point_row['name']
-            buffered_point = point.buffer(1e-5)
+            buffered_point = point.buffer(1e-9)
             buffered_points.append(buffered_point)
             
             if line_row.geometry.intersects(buffered_point):
@@ -202,11 +239,23 @@ if __name__ == "__main__":
     # Set the 'uuid' column as the index of the GeoDataFrame
     split_linestrings_gdf.set_index('uuid', inplace=True)
 
-    # fig, ax = plt.subplots()
-    # split_linestrings_gdf.plot(ax=ax, color='blue')
-    # snapped_points_gdf.plot(ax=ax, color='red', markersize=5)
-    # plt.show()
-
-    # # Save the split lines to a new GeoJSON file
+    # Save the split lines to a new GeoJSON file
     split_linestrings_gdf.to_file(ofds_polylines_geojson_file, driver='GeoJSON')
     # print(split_linestrings_gdf.head())
+    
+    # ##  Plot the snapped points and split lines
+    # fig, ax = plt.subplots()
+    # # Iterate through each row and plot with a random color
+    # for _, row in split_linestrings_gdf.iterrows():
+    #     random_color = "#" + ''.join([random.choice('0123456789ABCDEF') for j in range(6)])
+    #     ax.plot(*row.geometry.xy, color=random_color)
+
+    # # Plot the points
+    # snapped_points_gdf.plot(ax=ax, color='red', markersize=5)
+
+    # plt.show()
+
+# main
+if __name__ == "__main__":
+    main()
+    
