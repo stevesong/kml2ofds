@@ -12,8 +12,8 @@ matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 import matplotlib.pyplot as plt
 
 def list_kml_files(directory):
-    # List all .kml files in the given directory with their full paths.
-    kml_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.kml')]
+    # List all .kml files in the given directory.
+    kml_files = [f for f in os.listdir(directory) if f.endswith('.kml')]
     return kml_files
 
 def select_file(files):
@@ -154,7 +154,7 @@ def random_color():
 
 def main():
 # Prompt the user for a directory, defaulting to the "input" subdirectory if none is provided.
-    directory = input("Enter the directory path for kml files (leave blank to use the 'input' subdirectory): ").strip()
+    directory = input("Enter the directory path for kml files \n(leave blank to use the 'input' subdirectory): ").strip()
     if not directory:
         directory = os.path.join(os.getcwd(), 'input')
     
@@ -164,25 +164,25 @@ def main():
         print("No .kml files found in the directory.")
         exit()
     
-    kml_filename = select_file(kml_files)
-    print(f"\nYou selected: {kml_filename}")
-    
-    # kml_filename = "input/NOFBI_1.kml"        
-    # kml_filename = "input/MTN-Ghana-FOB-export.kml"
-    points_geojson_file = "output/NOFBI-points.geojson"
-    polylines_geojson_file = "output/NOFBI-polylines.geojson"
-    ofds_polylines_geojson_file = "output/NOFBI-ofds-polylines.geojson"
+    kml_file = select_file(kml_files)
+    kml_fullpath = os.path.join(directory, kml_file)
+    # set file names
+    base_name = os.path.splitext(os.path.basename(kml_fullpath))[0]
+    points_geojson_file = "output/" + base_name + "-points.geojson"
+    snapped_points_geojson_file = "output/" + base_name + "-snapped_points.geojson"
+    polylines_geojson_file = "output/" + base_name + "-polylines.geojson"
+    ofds_polylines_geojson_file = "output/" + base_name + "-ofds-polylines.geojson"
 
-    selected_level = choose_folder_level(kml_filename)
+    selected_level = choose_folder_level(kml_fullpath)
 
     # convert kml to geojson
     process_folders(
-        kml_filename, selected_level, points_geojson_file, polylines_geojson_file
+        kml_fullpath, selected_level, points_geojson_file, polylines_geojson_file
     )
     
     # Load the GeoJSON files into GeoDataFrames
-    points_gdf = gpd.read_file("output/NOFBI-points.geojson")
-    lines_gdf = gpd.read_file("output/NOFBI-polylines.geojson")
+    points_gdf = gpd.read_file(points_geojson_file)
+    lines_gdf = gpd.read_file(polylines_geojson_file)
     num_lines = len(lines_gdf)
     print("Number of lines:", num_lines)
 
@@ -198,7 +198,7 @@ def main():
     snapped_points_gdf = gpd.GeoDataFrame(points_gdf.drop(columns='geometry'), geometry=snapped_points, crs=points_gdf.crs)
 
     # Save the snapped points dataframe to a new GeoJSON file
-    snapped_points_gdf.to_file('output/NOFBI-snapped_points.geojson', driver='GeoJSON')
+    snapped_points_gdf.to_file(snapped_points_geojson_file , driver='GeoJSON')
 
     split_lines = []
     
