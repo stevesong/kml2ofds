@@ -2,7 +2,8 @@ from pykml import parser
 import os
 import inquirer 
 import json
-from shapely.geometry import MultiPolygon
+import numpy as np
+from shapely.geometry import MultiPolygon, Point
 from shapely.ops import split, nearest_points
 import geopandas as gpd
 import uuid
@@ -148,12 +149,99 @@ def save_geojson(data, filename):
     with open(filename, 'w') as file:
         json.dump(data, file)
 
+def find_end_point(polyline_endpoint, gdf_points):
+    point_geom = Point(polyline_endpoint)
+    # Filter points with the exact same coordinates
+    matched_points = gdf_points[gdf_points.geometry == point_geom]
+    if not matched_points.empty:
+        return matched_points.iloc[0]  # Return the first matched point if there are multiple
+    else:
+        return None  # Return None if no match is found
+
+def add_nodes_to_spans(gdf_polylines, gdf_points):
+    start_points = []
+    end_points = []
+
+    for _, polyline in gdf_polylines.iterrows():
+        start_point_geom = polyline.geometry.coords[0]
+        end_point_geom = polyline.geometry.coords[-1]
+
+        # Find the point with the same coordinates as the start and end points
+        matching_start_point = find_end_point(start_point_geom, gdf_points)
+        matching_end_point = find_end_point(end_point_geom, gdf_points)
+
+        if matching_start_point is not None:
+            start_points_info = {
+                "id": matching_start_point['id'],
+                "name": matching_start_point['name'],
+                "location": {
+                    "type": "Point",
+                    "coordinates": [matching_start_point.geometry.x, matching_start_point.geometry.y]
+                }
+            }
+        else:
+            start_points_info = None
+
+        if matching_end_point is not None:
+            end_points_info = {
+                "id": matching_end_point['id'],
+                "name": matching_end_point['name'],
+                "status": matching_end_point.get('status', 'unknown'),
+                "location": {
+                    "type": "Point",
+                    "coordinates": [matching_end_point.geometry.x, matching_end_point.geometry.y]
+                }
+            }
+        else:
+            end_points_info = None
+
+        # Append the matching points information to the lists
+        start_points.append(start_points_info)
+        end_points.append(end_points_info)
+
+    # Add the start and end points information to the polylines DataFrame
+    gdf_polylines['start'] = start_points
+    gdf_polylines['end'] = end_points
+
+    return gdf_polylines
+
+# Function to convert a dictionary to JSON, ensuring all numeric values are Python native types
+def convert_to_serializable(obj):
+    if isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(element) for element in obj]
+    elif isinstance(obj, (np.int64, np.int32, np.int16)):
+        return int(obj)
+    elif isinstance(obj, (np.float64, np.float32, np.float16)):
+        return float(obj)
+    else:
+        return obj
+
+
 # Function to generate a random color
 def random_color():
     return "#" + ''.join([random.choice('0123456789ABCDEF') for j in range(6)])
 
+def plot_results(points_gdf, linestrings_gdf):
+    # ##  Plot the snapped points and split lines
+    fig, ax = plt.subplots()
+    # Iterate through each row and plot with a random color
+    for _, row in linestrings_gdf.iterrows():
+        random_color = "#" + ''.join([random.choice('0123456789ABCDEF') for j in range(6)])
+        ax.plot(*row.geometry.xy, color=random_color)
+
+    # Plot the points
+    points_gdf.plot(ax=ax, color='red', markersize=5)
+    plt.show()
+
 def main():
-# Prompt the user for a directory, defaulting to the "input" subdirectory if none is provided.
+    
+    # set network name and id  (TODO: remove this and use a config file or prompt user for input)
+    network_name = "My Fibre Network"
+    network_id = str(uuid.uuid4())
+
+    # Prompt the user for a directory, defaulting to the "input" subdirectory if none is provided.
     directory = input("Enter the directory path for kml files \n(leave blank to use the 'input' subdirectory): ").strip()
     if not directory:
         directory = os.path.join(os.getcwd(), 'input')
@@ -173,6 +261,7 @@ def main():
     polylines_geojson_file = "output/" + base_name + "-polylines.geojson"
     ofds_polylines_geojson_file = "output/" + base_name + "-ofds-polylines.geojson"
 
+    # Allow the user to select a folder level from the KML file
     selected_level = choose_folder_level(kml_fullpath)
 
     # convert kml to geojson
@@ -197,6 +286,17 @@ def main():
     # Create a new GeoDataFrame with the snapped points
     snapped_points_gdf = gpd.GeoDataFrame(points_gdf.drop(columns='geometry'), geometry=snapped_points, crs=points_gdf.crs)
 
+
+    # Add metadata to the snapped points GeoDataFrame
+    snapped_points_gdf['id'] = range(1, len(points_gdf) + 1)
+    snapped_points_gdf['network_name'] = network_name
+    snapped_points_gdf['network_id'] = network_id
+    # Create a new column for the nested "network" structure
+    snapped_points_gdf['network'] = snapped_points_gdf.apply(lambda row: {'id': row['network_id'], 'name': row['network_name']}, axis=1)
+    # Drop the separate 'network_id' and 'network_name' columns as they are now nested within 'network'
+    snapped_points_gdf = snapped_points_gdf.drop(columns=['network_id', 'network_name'])
+    snapped_points_gdf['featureType'] = 'node'
+    
     # Save the snapped points dataframe to a new GeoJSON file
     snapped_points_gdf.to_file(snapped_points_geojson_file , driver='GeoJSON')
 
@@ -231,29 +331,24 @@ def main():
             segment_uuid = str(uuid.uuid4())
             split_lines.append((segment_uuid, line_row.geometry, polyline_name, ""))
 
-    print("Number of segments found:", len(split_lines))        
+    # print("Number of segments found:", len(split_lines))        
 
     # Create a new GeoDataFrame from the split linestrings
-    split_linestrings_gdf = gpd.GeoDataFrame(split_lines, columns=['uuid', 'geometry', 'polyline_name', 'point_names'], crs=lines_gdf.crs)
+    simple_spans_gdf = gpd.GeoDataFrame(split_lines, columns=['uuid', 'geometry', 'polyline_name', 'point_names'], crs=lines_gdf.crs)
 
     # Set the 'uuid' column as the index of the GeoDataFrame
-    split_linestrings_gdf.set_index('uuid', inplace=True)
+    # simple_spans_gdf.set_index('uuid', inplace=True)
+
+    ofds_spans_gdf = add_nodes_to_spans(simple_spans_gdf, snapped_points_gdf)
+
+    # Apply conversion to 'start' and 'end' columns in the ofds_spans_gdf DataFrame
+    ofds_spans_gdf['start'] = ofds_spans_gdf['start'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
+    ofds_spans_gdf['end'] = ofds_spans_gdf['end'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
 
     # Save the split lines to a new GeoJSON file
-    split_linestrings_gdf.to_file(ofds_polylines_geojson_file, driver='GeoJSON')
-    # print(split_linestrings_gdf.head())
+    ofds_spans_gdf.to_file(ofds_polylines_geojson_file, driver='GeoJSON')
     
-    # ##  Plot the snapped points and split lines
-    # fig, ax = plt.subplots()
-    # # Iterate through each row and plot with a random color
-    # for _, row in split_linestrings_gdf.iterrows():
-    #     random_color = "#" + ''.join([random.choice('0123456789ABCDEF') for j in range(6)])
-    #     ax.plot(*row.geometry.xy, color=random_color)
-
-    # # Plot the points
-    # snapped_points_gdf.plot(ax=ax, color='red', markersize=5)
-
-    # plt.show()
+    # plot_results(snapped_points_gdf, spans_gdf)
 
 # main
 if __name__ == "__main__":
