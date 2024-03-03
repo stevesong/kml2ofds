@@ -6,6 +6,7 @@ import numpy as np
 from shapely.geometry import MultiPolygon, Point
 from shapely.ops import split, nearest_points
 import geopandas as gpd
+import pandas as pd
 import uuid
 import random
 import matplotlib
@@ -141,6 +142,32 @@ def snap_to_line(point, lines):
 
     return nearest_point_on_line
 
+def snap_all_points(points, lines, network_name, network_id, ofds_points_geojson_file):
+    # Ensure CRS match, if not, reproject
+    if points.crs != lines.crs:
+        points = points.to_crs(lines.crs)
+        
+    # Apply the snap_to_line function to each point in the points GeoDataFrame
+    snapped_points = points.geometry.apply(lambda point: snap_to_line(point, lines))
+    print("Total number of snapped points:", snapped_points.size)
+    
+    # Create a new GeoDataFrame with the snapped points
+    snapped_points_gdf = gpd.GeoDataFrame(points.drop(columns='geometry'), geometry=snapped_points, crs=points.crs)
+
+    # Add metadata to the snapped points GeoDataFrame
+    snapped_points_gdf['id'] = [str(uuid.uuid4()) for _ in range(len(points))]
+    snapped_points_gdf['network_name'] = network_name
+    snapped_points_gdf['network_id'] = network_id
+    # Create a new column for the nested "network" structure
+    snapped_points_gdf['network'] = snapped_points_gdf.apply(lambda row: {'id': row['network_id'], 'name': row['network_name']}, axis=1)
+    # Drop the separate 'network_id' and 'network_name' columns as they are now nested within 'network'
+    snapped_points_gdf = snapped_points_gdf.drop(columns=['network_id', 'network_name'])
+    snapped_points_gdf['featureType'] = 'node'
+    
+    # Save the snapped points dataframe to a new GeoJSON file
+    snapped_points_gdf.to_file(ofds_points_geojson_file , driver='GeoJSON')
+    return snapped_points_gdf
+    
 def load_geojson(filename):
     with open(filename, 'r') as file:
         return json.load(file)
@@ -149,14 +176,18 @@ def save_geojson(data, filename):
     with open(filename, 'w') as file:
         json.dump(data, file)
 
-def find_end_point(polyline_endpoint, gdf_points):
+def find_end_point(polyline_endpoint, gdf_points, tolerance=0.00001):
     point_geom = Point(polyline_endpoint)
-    # Filter points with the exact same coordinates
-    matched_points = gdf_points[gdf_points.geometry == point_geom]
+    # Create a buffer around the point with the specified tolerance
+    buffered_point = point_geom.buffer(tolerance)
+    # Filter points that are within the buffer
+    matched_points = gdf_points[gdf_points.geometry.within(buffered_point)]
+    if len(matched_points) > 1:
+        print(f"{len(matched_points)} points found within the buffer")
     if not matched_points.empty:
-        return matched_points.iloc[0]  # Return the first matched point if there are multiple
+        return matched_points.iloc[0] # Return the first matched point if there are multiple
     else:
-        return None  # Return None if no match is found
+        return None # Return None if no match is found
 
 def add_nodes_to_spans(gdf_polylines, gdf_points):
     start_points = []
@@ -165,11 +196,11 @@ def add_nodes_to_spans(gdf_polylines, gdf_points):
     for _, polyline in gdf_polylines.iterrows():
         start_point_geom = polyline.geometry.coords[0]
         end_point_geom = polyline.geometry.coords[-1]
-
+        
         # Find the point with the same coordinates as the start and end points
         matching_start_point = find_end_point(start_point_geom, gdf_points)
         matching_end_point = find_end_point(end_point_geom, gdf_points)
-
+        
         if matching_start_point is not None:
             start_points_info = {
                 "id": matching_start_point['id'],
@@ -218,6 +249,112 @@ def convert_to_serializable(obj):
     else:
         return obj
 
+def break_polylines_at_nodepoints(ofds_points_gdf, lines_gdf, ofds_points_geojson_file, ofds_polylines_geojson_file, network_name, network_id):
+    split_lines = []
+    
+    # Iterate over the lines and find the snapped points that intersect each line
+    # breaking the lines into segments at the intersection points
+    for idx, line_row in lines_gdf.iterrows():
+        polyline_name = line_row['name']
+        feature_type = "span"
+        buffered_points = []
+        point_names = []
+        
+        for point_idx, point_row in ofds_points_gdf.iterrows():
+            point = point_row.geometry
+            point_name = point_row['name']
+            buffered_point = point.buffer(1e-9)
+            buffered_points.append(buffered_point)
+            
+            if line_row.geometry.intersects(buffered_point):
+                point_names.append(point_name)  # Capture the name of the intersecting point
+        
+        buffered_area = MultiPolygon(buffered_points)
+        
+        if line_row.geometry.intersects(buffered_area):
+            split_line = split(line_row.geometry, buffered_area)
+            for segment in split_line.geoms:
+                # Create a unique identifier for each line segment
+                segment_uuid = str(uuid.uuid4())
+                # Include both polyline and point names with the geometry
+                split_lines.append((segment_uuid, segment, polyline_name, feature_type, ", ".join(point_names)))
+        else:
+            # Generate a UUID for the original line if no intersection
+            segment_uuid = str(uuid.uuid4())
+            split_lines.append((segment_uuid, line_row.geometry, polyline_name, feature_type, ""))
+
+    # print("Number of segments found:", len(split_lines))        
+
+    # Create a new GeoDataFrame from the split linestrings
+    basic_spans_gdf = gpd.GeoDataFrame(split_lines, columns=['id', 'geometry', 'name', 'featureType', 'point_names'], crs=lines_gdf.crs)
+
+    # Add metadata to the split spans GeoDataFrame
+    basic_spans_gdf['network_name'] = network_name
+    basic_spans_gdf['network_id'] = network_id
+    basic_spans_gdf['network'] = basic_spans_gdf.apply(lambda row: {'id': row['network_id'], 'name': row['network_name']}, axis=1)
+    basic_spans_gdf = basic_spans_gdf.drop(columns=['network_id', 'network_name'])
+    
+    # Ensure that each segment has a start and end node
+    # If not, add the missing nodes to the ofds_points_gdf
+    tolerance = 1e-3 # Adjustable
+    new_nodes = [] # Store new nodes to be appended to the ofds_points_gdf
+    for idx, row in basic_spans_gdf.iterrows():
+        start_point = row.geometry.coords[0]
+        end_point = row.geometry.coords[-1]
+        
+        # Create buffers around the start and end points
+        start_buffer = Point(start_point).buffer(tolerance)
+        end_buffer = Point(end_point).buffer(tolerance)
+        
+        # Check if start and end points exist in ofds_points_gdf within the buffer
+        start_exists = ofds_points_gdf.geometry.intersects(start_buffer).any()
+        end_exists = ofds_points_gdf.geometry.intersects(end_buffer).any()
+        
+        # Add points if they don't exist
+        if not start_exists:
+            new_node = append_node(start_point, network_id, network_name)
+            new_nodes.append(new_node)
+        if not end_exists:
+            new_node = append_node(end_point, network_id, network_name)
+            new_nodes.append(new_node)
+    
+    print(len(new_nodes), " new nodes added where spans did not have a node an a start or end point")
+    
+     # Convert the list of new nodes into a GeoDataFrame
+    new_nodes_gdf = gpd.GeoDataFrame.from_features(new_nodes, crs=ofds_points_gdf.crs)
+    ofds_points_gdf = pd.concat([ofds_points_gdf, new_nodes_gdf], ignore_index=True)
+    ofds_points_gdf.to_file(ofds_points_geojson_file , driver='GeoJSON')
+
+    # Add the OFDS node metadata to the split span lines
+    ofds_spans_gdf = add_nodes_to_spans(basic_spans_gdf, ofds_points_gdf)
+
+    # Apply conversion to 'start' and 'end' columns in the ofds_spans_gdf DataFrame
+    ofds_spans_gdf['start'] = ofds_spans_gdf['start'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
+    ofds_spans_gdf['end'] = ofds_spans_gdf['end'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
+    
+    # Save the split lines to a new GeoJSON file
+    ofds_spans_gdf.to_file(ofds_polylines_geojson_file, driver='GeoJSON')
+
+
+def append_node(new_node_coords,network_id, network_name):
+    # Returns a GeoJSON feature dictionary representing the new node 
+    return {
+        "type": "Feature",
+        "geometry": {
+            "type": "Point",
+            "coordinates": new_node_coords
+        },
+        "properties": {
+            "id": str(uuid.uuid4()), # Generate a new UUID for the id
+            "name": "Auto generated missing node", # You might want to generate a more descriptive name
+            "network": {
+                "id": network_id,
+                "name": network_name
+            },
+            "featureType": "node"
+        }
+    }
+
 
 # Function to generate a random color
 def random_color():
@@ -257,7 +394,7 @@ def main():
     # set file names
     base_name = os.path.splitext(os.path.basename(kml_fullpath))[0]
     points_geojson_file = "output/" + base_name + "-points.geojson"
-    snapped_points_geojson_file = "output/" + base_name + "-snapped_points.geojson"
+    ofds_points_geojson_file = "output/" + base_name + "-ofds-points.geojson"
     polylines_geojson_file = "output/" + base_name + "-polylines.geojson"
     ofds_polylines_geojson_file = "output/" + base_name + "-ofds-polylines.geojson"
 
@@ -275,78 +412,14 @@ def main():
     num_lines = len(lines_gdf)
     print("Number of lines:", num_lines)
 
-    # Ensure CRS match, if not, reproject
-    if points_gdf.crs != lines_gdf.crs:
-        points_gdf = points_gdf.to_crs(lines_gdf.crs)
-        
-    # Apply the snap_to_line function to each point in the points GeoDataFrame
-    snapped_points = points_gdf.geometry.apply(lambda point: snap_to_line(point, lines_gdf))
-    print("Total number of snapped points:", snapped_points.size)
-    
-    # Create a new GeoDataFrame with the snapped points
-    snapped_points_gdf = gpd.GeoDataFrame(points_gdf.drop(columns='geometry'), geometry=snapped_points, crs=points_gdf.crs)
+    # Snap the points to the nearest line and add basic OFDS metadata
+    ofds_points_gdf = snap_all_points(points_gdf, lines_gdf, network_name, network_id, ofds_points_geojson_file)
 
-
-    # Add metadata to the snapped points GeoDataFrame
-    snapped_points_gdf['id'] = range(1, len(points_gdf) + 1)
-    snapped_points_gdf['network_name'] = network_name
-    snapped_points_gdf['network_id'] = network_id
-    # Create a new column for the nested "network" structure
-    snapped_points_gdf['network'] = snapped_points_gdf.apply(lambda row: {'id': row['network_id'], 'name': row['network_name']}, axis=1)
-    # Drop the separate 'network_id' and 'network_name' columns as they are now nested within 'network'
-    snapped_points_gdf = snapped_points_gdf.drop(columns=['network_id', 'network_name'])
-    snapped_points_gdf['featureType'] = 'node'
-    
-    # Save the snapped points dataframe to a new GeoJSON file
-    snapped_points_gdf.to_file(snapped_points_geojson_file , driver='GeoJSON')
-
-    split_lines = []
-    
     # Iterate over the lines and find the snapped points that intersect each line
-    for idx, line_row in lines_gdf.iterrows():
-        polyline_name = line_row['name']
-        buffered_points = []
-        point_names = []
-        
-        for point_idx, point_row in snapped_points_gdf.iterrows():
-            point = point_row.geometry
-            point_name = point_row['name']
-            buffered_point = point.buffer(1e-9)
-            buffered_points.append(buffered_point)
-            
-            if line_row.geometry.intersects(buffered_point):
-                point_names.append(point_name)  # Capture the name of the intersecting point
-        
-        buffered_area = MultiPolygon(buffered_points)
-        
-        if line_row.geometry.intersects(buffered_area):
-            split_line = split(line_row.geometry, buffered_area)
-            for segment in split_line.geoms:
-                # Create a unique identifier for each line segment
-                segment_uuid = str(uuid.uuid4())
-                # Include both polyline and point names with the geometry
-                split_lines.append((segment_uuid, segment, polyline_name, ", ".join(point_names)))
-        else:
-            # Generate a UUID for the original line if no intersection
-            segment_uuid = str(uuid.uuid4())
-            split_lines.append((segment_uuid, line_row.geometry, polyline_name, ""))
+    # breaking the lines into segments at the intersection points
+    break_polylines_at_nodepoints(ofds_points_gdf, lines_gdf, ofds_points_geojson_file, ofds_polylines_geojson_file, network_name, network_id)
 
-    # print("Number of segments found:", len(split_lines))        
 
-    # Create a new GeoDataFrame from the split linestrings
-    simple_spans_gdf = gpd.GeoDataFrame(split_lines, columns=['uuid', 'geometry', 'polyline_name', 'point_names'], crs=lines_gdf.crs)
-
-    # Set the 'uuid' column as the index of the GeoDataFrame
-    # simple_spans_gdf.set_index('uuid', inplace=True)
-
-    ofds_spans_gdf = add_nodes_to_spans(simple_spans_gdf, snapped_points_gdf)
-
-    # Apply conversion to 'start' and 'end' columns in the ofds_spans_gdf DataFrame
-    ofds_spans_gdf['start'] = ofds_spans_gdf['start'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
-    ofds_spans_gdf['end'] = ofds_spans_gdf['end'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
-
-    # Save the split lines to a new GeoJSON file
-    ofds_spans_gdf.to_file(ofds_polylines_geojson_file, driver='GeoJSON')
     
     # plot_results(snapped_points_gdf, spans_gdf)
 
