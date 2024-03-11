@@ -37,7 +37,6 @@ def get_folder_levels(folder, level=1):
 
     for child_folder in getattr(folder, 'Folder', []):
         levels.extend(get_folder_levels(child_folder, level + 1))
-
     return levels
 
 #  Allow user to select a folder level depth to process
@@ -99,15 +98,6 @@ def process_placemarks(placemarks, level, selected_level, points, polylines):
                 coordinates = parse_coordinates(placemark.LineString.coordinates.text, "LineString")
                 polylines.append(create_geojson_feature("LineString", name, coordinates))
 
-def process_folders_recursive(folder, level, selected_level, points, polylines):
-    if hasattr(folder, "name"):
-        if level >= selected_level:
-            print(f"Processing Level {level}: {folder.name}")
-            process_placemarks(getattr(folder, 'Placemark', []), level, selected_level, points, polylines)
-
-        for child_folder in getattr(folder, 'Folder', []):
-            process_folders_recursive(child_folder, level + 1, selected_level, points, polylines)
-
 def process_folders(filename, selected_level, points_geojson_file, polylines_geojson_file):
     points, polylines = [], []
 
@@ -122,6 +112,15 @@ def process_folders(filename, selected_level, points_geojson_file, polylines_geo
             json.dump({"type": "FeatureCollection", "features": features}, output, indent=2, default=str)
 
     # return points, polylines
+
+def process_folders_recursive(folder, level, selected_level, points, polylines):
+    if hasattr(folder, "name"):
+        if level >= selected_level:
+            print(f"Processing Level {level}: {folder.name}")
+            process_placemarks(getattr(folder, 'Placemark', []), level, selected_level, points, polylines)
+
+        for child_folder in getattr(folder, 'Folder', []):
+            process_folders_recursive(child_folder, level + 1, selected_level, points, polylines)
 
 # Function to find the nearest line to each point and find the nearest point on that line to the point
 def snap_to_line(point, lines):
