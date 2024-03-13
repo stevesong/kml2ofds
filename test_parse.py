@@ -34,7 +34,7 @@ def select_file(files):
     return answers["file"]
 
 
-def process_kml(filename):
+def process_kml(filename, network_id, network_name):
     with open(filename) as f:
         kml_doc = parser.parse(f).getroot()
     geojson_nodes = []
@@ -42,7 +42,7 @@ def process_kml(filename):
     # Start processing from the root Document
     # First look for multiple Documents within the KML file.
     for document in kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"):
-        nodes, spans = process_document(document)
+        nodes, spans = process_document(document, network_id, network_name)
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
 
@@ -70,7 +70,7 @@ def process_kml(filename):
     return gdf_ofds_nodes, gdf_spans
 
 
-def process_document(document):
+def process_document(document,network_id,network_name):
     """Process a KML Document and return a list of GeoJSON nodes and spans.
 
     Args:
@@ -82,9 +82,6 @@ def process_document(document):
     """
     geojson_nodes = []
     geojson_spans = []
-
-    network_name = "My Fibre Network"
-    network_id = str(uuid.uuid4())
 
     # Process Folders within the Document
     for folder in document.iter("{http://www.opengis.net/kml/2.2}Folder"):
@@ -172,7 +169,7 @@ def process_document(document):
                     },
                     "geometry": {
                         "type": "LineString",
-                        "coordinates": list(shapely_line.coords)
+                        "coordinates":  [(x, y) for x, y, *_ in shapely_line.coords]
                     },
                 }
                 # Add the GeoJSON object to the list
@@ -228,13 +225,14 @@ def break_spans_at_node_points(gdf_nodes, gdf_spans, network_name, network_id, n
 
     # Iterate over the spans and find the nodes that intersect each span
     # breaking the spans into segments at each node intersection
-    for line_row in gdf_spans.iterrows():
+    for _, line_row in gdf_spans.iterrows():
         span_name = line_row['name']
         buffered_points = []
+        intersected_buffered_points = []
         point_names = []
         
         # Create a buffer around each node point
-        for point_row in gdf_nodes.iterrows():
+        for _, point_row in gdf_nodes.iterrows():
             point = point_row.geometry
             point_name = point_row['name']
             buffered_point = point.buffer(1e-9)
@@ -242,35 +240,37 @@ def break_spans_at_node_points(gdf_nodes, gdf_spans, network_name, network_id, n
             
             # Check if the line intersects the buffered point and add the point name to the point_names list
             if line_row.geometry.intersects(buffered_point):
-                point_names.append(point_name)  # Capture the name of the intersecting point
+                intersected_buffered_points.append(buffered_point)
+                # point_names.append(point_name)  # Capture the name of the intersecting point
         
-        buffered_area = MultiPolygon(buffered_points)
+        buffered_area = MultiPolygon(intersected_buffered_points)
         
         if line_row.geometry.intersects(buffered_area):
             split_line = split(line_row.geometry, buffered_area)
             for segment in split_line.geoms:
-                # Create a unique identifier for each line segment
                 segment_uuid = str(uuid.uuid4())
                 # Include both polyline and point names with the geometry
-                split_lines.append((segment_uuid, segment, span_name, ", ".join(point_names)))
+                split_lines.append((segment_uuid, segment, span_name, featureType, ", ".join(point_names)))
         else:
             # Generate a UUID for the original line if no intersection
             segment_uuid = str(uuid.uuid4())
-            split_lines.append((segment_uuid, line_row.geometry, span_name, ""))
+            split_lines.append((segment_uuid, line_row.geometry, span_name, featureType, ""))
 
-    # print("Number of segments found:", len(split_lines))        
+    print("Number of segments found:", len(split_lines))        
 
     # Create a new GeoDataFrame from the split linestrings
-    gdf_basic_spans = gpd.GeoDataFrame(split_lines, columns=['id', 'geometry', 'name', 'featureType', 'point_names'])
+    gdf_spans = gpd.GeoDataFrame(split_lines, columns=['id', 'geometry', 'name', 'featureType', 'point_names'])
 
     # Add network metadata to the split spans GeoDataFrame
-    gfd_basic_spans = gdf_basic_spans.apply(lambda row: update_network_field(row, network_name, network_id, network_links), axis=1)
+    gdf_spans = gdf_spans.apply(lambda row: update_network_field(row, network_name, network_id, network_links), axis=1)
     
+    return gdf_spans
+
+def add_missing_nodes(gdf_spans, gdf_nodes, network_id, network_name, network_links, tolerance = 1e-3):
     # Ensure that each segment has a start and end node
     # If not, add the missing nodes to the ofds_points_gdf
-    tolerance = 1e-3 # Adjustable
     new_nodes = [] # Store new nodes to be appended to the ofds_points_gdf
-    for idx, row in basic_spans_gdf.iterrows():
+    for _, row in gdf_spans.iterrows():
         start_point = row.geometry.coords[0]
         end_point = row.geometry.coords[-1]
         
@@ -279,8 +279,8 @@ def break_spans_at_node_points(gdf_nodes, gdf_spans, network_name, network_id, n
         end_buffer = Point(end_point).buffer(tolerance)
         
         # Check if start and end points exist in ofds_points_gdf within the buffer
-        start_exists = ofds_points_gdf.geometry.intersects(start_buffer).any()
-        end_exists = ofds_points_gdf.geometry.intersects(end_buffer).any()
+        start_exists = gdf_nodes.geometry.intersects(start_buffer).any()
+        end_exists = gdf_nodes.geometry.intersects(end_buffer).any()
         
         # Add points if they don't exist
         if not start_exists:
@@ -294,23 +294,104 @@ def break_spans_at_node_points(gdf_nodes, gdf_spans, network_name, network_id, n
     
      # Convert the list of new nodes into a GeoDataFrame
     if new_nodes:
-        new_nodes_gdf = gpd.GeoDataFrame.from_features(new_nodes, crs=ofds_points_gdf.crs)
-        ofds_points_gdf = pd.concat([ofds_points_gdf, new_nodes_gdf], ignore_index=True)
-    ofds_points_gdf.to_file(ofds_points_geojson_file , driver='GeoJSON')
+        new_nodes_gdf = gpd.GeoDataFrame.from_features(new_nodes, crs=gdf_nodes.crs)
+        gdf_nodes = pd.concat([gdf_nodes, new_nodes_gdf], ignore_index=True)
+   
+    return gdf_nodes
 
-    # Add the OFDS node metadata to the split span lines
-    ofds_spans_gdf = add_nodes_to_spans(basic_spans_gdf, ofds_points_gdf)
+def add_nodes_to_spans(gdf_spans, gdf_nodes):
+    
+    start_points = []
+    end_points = []
 
+    for _, span in gdf_spans.iterrows():
+        start_point_geom = span.geometry.coords[0]
+        end_point_geom = span.geometry.coords[-1]
+        
+        # Find the point with the same coordinates as the start and end points
+        matching_start_point = find_end_point(start_point_geom, gdf_nodes)
+        matching_end_point = find_end_point(end_point_geom, gdf_nodes)
+        
+        if matching_start_point is not None:
+            start_points_info = {
+                "id": matching_start_point['id'],
+                "name": matching_start_point['name'],
+                "location": {
+                    "type": "Point",
+                    "coordinates": [matching_start_point.geometry.x, matching_start_point.geometry.y]
+                }
+            }
+        else:
+            start_points_info = None
+
+        if matching_end_point is not None:
+            end_points_info = {
+                "id": matching_end_point['id'],
+                "name": matching_end_point['name'],
+                "status": matching_end_point.get('status', 'unknown'),
+                "location": {
+                    "type": "Point",
+                    "coordinates": [matching_end_point.geometry.x, matching_end_point.geometry.y]
+                }
+            }
+        else:
+            end_points_info = None
+
+        # Append the matching points information to the lists
+        start_points.append(start_points_info)
+        end_points.append(end_points_info)
+
+    # Add the start and end points information to the polylines DataFrame
+    gdf_spans['start'] = start_points
+    gdf_spans['end'] = end_points
+    
     # Apply conversion to 'start' and 'end' columns in the ofds_spans_gdf DataFrame
-    ofds_spans_gdf['start'] = ofds_spans_gdf['start'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
-    ofds_spans_gdf['end'] = ofds_spans_gdf['end'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
+    gdf_spans['start'] = gdf_spans['start'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
+    gdf_spans['end'] = gdf_spans['end'].apply(lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None)
+
+    return gdf_spans
+
+def find_end_point(span_endpoint, gdf_nodes, tolerance=1e-3):
+    point_geom = Point(span_endpoint)
+    # Create a buffer around the point with the specified tolerance
+    buffered_point = point_geom.buffer(tolerance)
+    # Filter points that are within the buffer
+    matched_points = gdf_nodes[gdf_nodes.geometry.within(buffered_point)]
+    if len(matched_points) > 1:
+        print(f"{len(matched_points)} points found within the buffer")
+    if not matched_points.empty:
+        # Calculate distances from the endpoint to each matched point
+        distances = matched_points.geometry.apply(lambda geom: point_geom.distance(geom))
+        # Find the index of the point with the minimum distance
+        closest_point_index = distances.idxmin()
+        # Return the closest matched point
+        return matched_points.loc[closest_point_index]
+    else:
+        return None # Return None if no match is found
     
-    # Save the split lines to a new GeoJSON file
-    ofds_spans_gdf.to_file(ofds_polylines_geojson_file, driver='GeoJSON')
+def append_node(new_node_coords,network_id, network_name, network_links):
+    # Returns a GeoJSON feature dictionary representing the new node 
+    return {
+        "type": "Feature",
+        "geometry": {
+            "type": "Point",
+            "coordinates": new_node_coords
+        },
+        "properties": {
+            "id": str(uuid.uuid4()), # Generate a new UUID for the id
+            "name": "Auto generated missing node", # You might want to generate a more descriptive name
+            "network": {
+                "id": network_id,
+                "name": network_name,
+                "links": network_links
+            },
+            "featureType": "node"
+        }
+    }
     
-# Function to update the 'network' field with 'links'
 def update_network_field(row, network_name, network_id, network_links):
-    # Check if 'network' key exists in the row's dictionary
+    '''Updates the 'network' field in the row's dictionary with 'id', 'name', and 'links' keys.'''
+
     if 'network' not in row:
         # If 'network' does not exist, create it as a dictionary
         row['network'] = {}
@@ -322,7 +403,18 @@ def update_network_field(row, network_name, network_id, network_links):
     
     return row
     
-    
+def convert_to_serializable(obj):
+    '''Converts a dictionary to JSON, ensuring all numeric values are Python native types.'''
+    if isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(element) for element in obj]
+    elif isinstance(obj, (np.int64, np.int32, np.int16)):
+        return int(obj)
+    elif isinstance(obj, (np.float64, np.float32, np.float16)):
+        return float(obj)
+    else:
+        return obj    
 
 def main():
     
@@ -335,6 +427,13 @@ def main():
             "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
         }
     ]
+    
+    # output files
+    nodes_ofds_output ="output/nodes_ofds.geojson"
+    spans_ofds_output = "output/spans_ofds.geojson"
+    nodes_output = "output/nodes.geojson"
+    spans_output = "output/spans.geojson"
+    
     # Prompt the user for a directory, defaulting to the "input" subdirectory if none is provided.
     directory = input(
         "Enter the directory path for kml files \n(leave blank to use the 'input' subdirectory): "
@@ -353,9 +452,24 @@ def main():
     # set file names
     base_name = os.path.splitext(os.path.basename(kml_fullpath))[0]
 
-    gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath)
-    break_spans_at_node_points(gdf_ofds_nodes, gdf_spans, network_name, network_id, network_links)
+    # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
+    gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name)
+    print("Number of nodes:", gdf_ofds_nodes.size)
+    print("Number of spans:", gdf_spans.size)
+    
+    # Break spans at node points
+    gdf_spans = break_spans_at_node_points(gdf_ofds_nodes, gdf_spans, network_name, network_id, network_links)
+    print("Number of segments found:", gdf_spans.size)
+    
+    # Check for any spans that do not have a node at the start or end point and add as needed
+    gdf_ofds_nodes = add_missing_nodes(gdf_spans, gdf_ofds_nodes, network_id, network_name, network_links)
 
+    # Add information on the start and end nodes to the spans    
+    gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
+    
+    # Save the results to geojson files
+    gdf_ofds_spans.to_file(spans_ofds_output, driver='GeoJSON')
+    gdf_ofds_nodes.to_file(nodes_ofds_output , driver='GeoJSON')
 
 # main
 if __name__ == "__main__":
