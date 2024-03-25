@@ -646,19 +646,17 @@
 		<Placemark>
 			<name>Cape Coast_1</name>
 			<LookAt>
-				<gx:TimeStamp><when>2012-11-06T10:29:50Z</when>
-</gx:TimeStamp>
-				<longitude>-1.247367507986769</longitude>
-				<latitude>5.114712899896501</latitude>
+				<longitude>-1.24424637957213</longitude>
+				<latitude>5.115683290005069</latitude>
 				<altitude>0</altitude>
-				<heading>-3.187538209055759</heading>
-				<tilt>0</tilt>
-				<range>41.86798066794272</range>
-				<altitudeMode>relativeToGround</altitudeMode>
+				<heading>-0.06753699129066541</heading>
+				<tilt>34.16174686476204</tilt>
+				<range>1469.152135215196</range>
+				<gx:altitudeMode>relativeToSeaFloor</gx:altitudeMode>
 			</LookAt>
 			<styleUrl>#msn_ranger_station562214121121121112210</styleUrl>
 			<Point>
-				<coordinates>-1.247298176147689,5.114700635891141,0</coordinates>
+				<coordinates>-1.245876920281412,5.114775506140151,0</coordinates>
 			</Point>
 		</Placemark>
 		<Placemark>
