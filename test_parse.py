@@ -88,7 +88,7 @@ def process_document(document, network_id, network_name):
 
     # Process Folders within the Document
     for folder in document.iter("{http://www.opengis.net/kml/2.2}Folder"):
-        print(f" Folder: {folder.name.text}")
+        print(f" Found folder: {folder.name.text}")
         # Process Placemarks within this Folder
         for placemark in folder.iter("{http://www.opengis.net/kml/2.2}Placemark"):
 
@@ -182,21 +182,15 @@ def process_document(document, network_id, network_name):
     return geojson_nodes, geojson_spans
 
 
-def snap_to_line(point, lines):
+def snap_to_line(point, lines, tolerance=1e-4):
     """Find the nearest line to a given point and find the nearest point on that line to the given point.
-
-    Args:
-        point (Point): The point to snap to the nearest line.
-        lines (LineString): The collection of lines to search for the nearest line.
-
-    Returns:
-        Point: The nearest point on the nearest line to the given point.
     """
+
     nearest_line = None
     min_distance = float("inf")
     nearest_point_on_line = None
 
-    # Iterate over all lines to find the nearest one
+    # Iterate over all lines to find the nearest one and snap the point to it
     for line in lines.geometry:
         # Use nearest_points to get the nearest point on the line to our point
         point_on_line = nearest_points(point, line)[1]
@@ -206,6 +200,18 @@ def snap_to_line(point, lines):
             min_distance = distance
             nearest_line = line
             nearest_point_on_line = point_on_line
+
+    # If the snapped point is close to the start or end of the line, snap to that point within the tolerance
+    if nearest_line is not None:
+        start_point = nearest_line.coords[0]
+        end_point = nearest_line.coords[-1]
+        start_buffer = Point(start_point).buffer(tolerance)
+        end_buffer = Point(end_point).buffer(tolerance)
+
+        if nearest_point_on_line.within(start_buffer):
+            nearest_point_on_line = Point(start_point)
+        elif nearest_point_on_line.within(end_buffer):
+            nearest_point_on_line = Point(end_point)
 
     return nearest_point_on_line
 
@@ -266,14 +272,11 @@ def break_spans_at_node_points(
             # Check for self-intersecting spans
             if line_row.geometry.is_simple:
                 split_line = split(line_row.geometry, buffered_area)
-                print("Simple line is type", type(split_line))
             else:
                 self_intersect = find_self_intersection(line_row.geometry)
                 self_intersects.append(self_intersect)
-                print("Found self-intersection points:", self_intersect)
                 split_line = split(line_row.geometry, buffered_area)
                 split_line = rejoin_self_intersection_breaks(split_line, self_intersect)
-                print("Complex line is ", type(split_line))
 
             for segment in split_line.geoms:
                 segment_uuid = str(uuid.uuid4())
@@ -362,9 +365,6 @@ def rejoin_self_intersection_breaks(split_lines, intersect_points):
 
                 joined_lines.append(joined_line)
             else:
-                print(
-                    "The last point of line1 is not equal to the first point of line2."
-                )
                 joined_lines.append(current_line)
         else:
             joined_lines.append(current_line)
@@ -376,7 +376,7 @@ def rejoin_self_intersection_breaks(split_lines, intersect_points):
 
 
 def add_missing_nodes(
-    gdf_spans, gdf_nodes, network_id, network_name, network_links, tolerance=1e-3
+    gdf_spans, gdf_nodes, network_id, network_name, network_links, tolerance=1e-6
 ):
     # Ensure that each segment has a start and end node
     # If not, add the missing nodes to the ofds_points_gdf
@@ -401,11 +401,6 @@ def add_missing_nodes(
             new_node = append_node(end_point, network_id, network_name, network_links)
             new_nodes.append(new_node)
 
-    print(
-        len(new_nodes),
-        " new nodes added where spans did not have a node at a start or end point",
-    )
-
     # Convert the list of new nodes into a GeoDataFrame
     if new_nodes:
         new_nodes_gdf = gpd.GeoDataFrame.from_features(new_nodes, crs=gdf_nodes.crs)
@@ -418,6 +413,7 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
 
     start_points = []
     end_points = []
+    counter = 0
 
     for _, span in gdf_spans.iterrows():
         start_point_geom = span.geometry.coords[0]
@@ -461,6 +457,10 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
         # Append the matching points information to the lists
         start_points.append(start_points_info)
         end_points.append(end_points_info)
+        # Increment the counter and display the progress
+        counter += 1
+        print(f"\rAssociating nodes with spans {counter} of {len(gdf_spans)}", end='', flush=True)
+
 
     # Add the start and end points information to the polylines DataFrame
     gdf_spans["start"] = start_points
@@ -483,8 +483,7 @@ def find_end_point(span_endpoint, gdf_nodes, tolerance=1e-3):
     buffered_point = point_geom.buffer(tolerance)
     # Filter points that are within the buffer
     matched_points = gdf_nodes[gdf_nodes.geometry.within(buffered_point)]
-    # if len(matched_points) > 1:
-    #     print(f"{len(matched_points)} points found within the buffer")
+
     if not matched_points.empty:
         # Calculate distances from the endpoint to each matched point
         distances = matched_points.geometry.apply(
@@ -528,6 +527,7 @@ def update_network_field(row, network_name, network_id, network_links):
 
 
 def check_node_ids(gdf_nodes, gdf_spans):
+    counter = 0
     # Create a set of all node IDs
     node_ids = set(gdf_nodes["id"])
 
@@ -571,14 +571,15 @@ def check_node_ids(gdf_nodes, gdf_spans):
                 },
             }
             missing_nodes_geojson.append(missing_node_geojson)
+        counter += 1
+        print(f"\rChecking for unassociated nodes {counter} of {len(gdf_nodes)}", end='', flush=True)
+
     if missing_nodes_geojson:
         # Write the GeoJSON features for missing nodes to a file
         with open("output/missing_nodes.geojson", "w") as f:
             json.dump(
                 {"type": "FeatureCollection", "features": missing_nodes_geojson}, f
             )
-            print(missing_nodes_geojson)
-            print("Missing nodes written to output/missing_nodes.geojson")
 
 
 def convert_to_serializable(obj):
@@ -652,11 +653,11 @@ def main():
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
 
     check_node_ids(gdf_ofds_nodes, gdf_ofds_spans)
-
+    
     # Save the results to geojson files
     gdf_ofds_spans.to_file(spans_ofds_output, driver="GeoJSON")
     gdf_ofds_nodes.to_file(nodes_ofds_output, driver="GeoJSON")
-
+    print("\nComplete")
 
 # main
 if __name__ == "__main__":
