@@ -1,4 +1,5 @@
 from pykml import parser
+import configparser
 import os
 import inquirer
 import json
@@ -20,6 +21,26 @@ from collections import Counter
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 # import matplotlib.pyplot as plt
 
+def load_config(config_file):
+    config = configparser.ConfigParser()
+    config.read(config_file)
+
+    # Accessing default values
+    network_name = config.get('DEFAULT', 'network_name')
+    network_id = config.get('DEFAULT', 'network_id')
+    network_links = config.get('DEFAULT', 'network_links')
+
+    # Accessing values under a specific section
+    input_directory = config.get('DIRECTORY', 'input_directory')
+    output_directory = config.get('DIRECTORY', 'output_directory')
+
+    return {
+        'network_name': network_name,
+        'network_id': network_id,
+        'network_links': network_links,
+        'input_directory': input_directory,
+        'output_directory': output_directory
+    }
 
 def list_kml_files(directory):
     # List all .kml files in the given directory.
@@ -88,7 +109,7 @@ def process_document(document, network_id, network_name):
 
     # Process Folders within the Document
     for folder in document.iter("{http://www.opengis.net/kml/2.2}Folder"):
-        print(f" Found folder: {folder.name.text}")
+        print(f"Found folder: {folder.name.text}")
         # Process Placemarks within this Folder
         for placemark in folder.iter("{http://www.opengis.net/kml/2.2}Placemark"):
 
@@ -616,16 +637,33 @@ def convert_to_serializable(obj):
 
 def main():
 
-    # set network name,id, and links  (TODO: remove this and use a config file)
-    network_name = "My Fibre Network"
-    network_id = str(uuid.uuid4())
+    config_file = 'kml2ofds.config'
+    config_values = load_config(config_file)
+    
+    # set network name,id, and links
+    if not config_values['network_name']:
+        network_name = "Default Network Name"
+        print("Network name not found in config file. Using default value.")
+    else:
+        network_name = config_values['network_name']
+        
+    if not config_values['network_id']:
+        network_id = str(uuid.uuid4())
+    else:
+        network_id = config_values['network_id']    
+    
+    if not config_values['network_links']:
+        network_link_url = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
+        print("Network links not found in config file. Using default value.")
+    else:
+        network_link_url = config_values['network_links']
+    
     network_links = [
         {
             "rel": "describedby",
-            "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+            "href": network_link_url
         }
     ]
-
     # output files
     nodes_ofds_output = "output/nodes_ofds.geojson"
     spans_ofds_output = "output/spans_ofds.geojson"

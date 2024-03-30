@@ -2,8 +2,8 @@ data/MTN-Ghana-FOC-point.qmd
 data/QGIS-working.qgz
 data/MTN-Ghana-FOC-line.qmd
 kml2ofds-testing.qgz
-output/
-input/
+output/*
+input/*
 __pycache__/
 .vscode/
 __pycache__/test_parse.cpython-311-pytest-8.0.2.pyc
