@@ -1,5 +1,6 @@
 from pykml import parser
 import configparser
+from datetime import datetime
 import os
 import inquirer
 import json
@@ -637,7 +638,7 @@ def convert_to_serializable(obj):
 
 def main():
 
-    config_file = 'kml2ofds.config'
+    config_file = 'kml2ofds.ini'
     config_values = load_config(config_file)
     
     # set network name,id, and links
@@ -665,8 +666,21 @@ def main():
         }
     ]
     # output files
-    nodes_ofds_output = "output/nodes_ofds.geojson"
-    spans_ofds_output = "output/spans_ofds.geojson"
+    today = datetime.today()
+    date_string = today.strftime('%d%b%Y').lower()
+    if not config_values['input_directory']:
+        input_directory = "input/"
+    else:
+        input_directory = config_values['input_directory']
+    if not config_values['output_directory']:
+        output_directory = "output/"
+    else:
+        output_directory = config_values['output_directory']
+
+    network_file_name = network_name.replace(" ", "_").lower()
+        
+    nodes_ofds_output = output_directory + network_file_name + "_ofds-nodes_" + date_string + ".geojson"
+    spans_ofds_output = output_directory + network_file_name + "_ofds-spans_" + date_string + ".geojson"
     nodes_output = "output/nodes.geojson"
     spans_output = "output/spans.geojson"
 
@@ -675,7 +689,7 @@ def main():
         "Enter the directory path for kml files \n(leave blank to use the 'input' subdirectory): "
     ).strip()
     if not directory:
-        directory = os.path.join(os.getcwd(), "input")
+        directory = os.path.join(os.getcwd(), input_directory)
 
     kml_files = list_kml_files(directory)
 
