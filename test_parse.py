@@ -15,7 +15,6 @@ import geopandas as gpd
 import pandas as pd
 import uuid
 from collections import Counter
-import random
 
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
@@ -49,6 +48,7 @@ def process_kml(filename, network_id, network_name):
     # Start processing from the root Document
     # First look for multiple Documents within the KML file.
     for document in kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"):
+        print(f"Found document: {document.name.text}")
         nodes, spans = process_document(document, network_id, network_name)
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
@@ -137,8 +137,15 @@ def process_document(document, network_id, network_name):
                         "coordinates": [shapely_point.x, shapely_point.y],
                     },
                 }
-                # Add the GeoJSON object to the list
-                geojson_nodes.append(geojson_node)
+                # Check for duplicates before adding the GeoJSON object to the list
+                is_duplicate = any(
+                    node["properties"]["name"] == name and
+                    node["geometry"]["coordinates"] == geojson_node["geometry"]["coordinates"]
+                    for node in geojson_nodes
+                )
+                # If not already there, add the GeoJSON object to the list
+                if not is_duplicate:
+                    geojson_nodes.append(geojson_node)
 
             # Process Polylines
             polyline = placemark.find("{http://www.opengis.net/kml/2.2}LineString")
@@ -175,8 +182,15 @@ def process_document(document, network_id, network_name):
                         "coordinates": [(x, y) for x, y, *_ in shapely_line.coords],
                     },
                 }
-                # Add the GeoJSON object to the list
-                geojson_spans.append(geojson_span)
+                # Check for duplicates before adding the GeoJSON object to the list
+                is_span_duplicate = any(
+                    span["properties"]["name"] == name and
+                    span["geometry"]["coordinates"] == geojson_span["geometry"]["coordinates"]
+                    for span in geojson_spans
+                )
+                # If not a duplicate, add the GeoJSON object to the list
+                if not is_span_duplicate:
+                    geojson_spans.append(geojson_span)
 
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
@@ -403,11 +417,15 @@ def add_missing_nodes(
 
     # Convert the list of new nodes into a GeoDataFrame
     if new_nodes:
+        # print(new_nodes[:5])
         new_nodes_gdf = gpd.GeoDataFrame.from_features(new_nodes, crs=gdf_nodes.crs)
-        gdf_nodes = pd.concat([gdf_nodes, new_nodes_gdf], ignore_index=True)
+        print(f"Adding {len(new_nodes)} missing nodes")
+        print(f"Number of records in new_nodes_gdf: {len(new_nodes_gdf)}")
+        print(f"Number of gdf_nodes prior to adding missing nodes: {len(gdf_nodes)}")
+        combined_gdf_nodes = pd.concat([gdf_nodes, new_nodes_gdf], ignore_index=True)
+        print(f"Number of gdf_nodes after adding missing nodes: {len(combined_gdf_nodes)}")
 
-    return gdf_nodes
-
+    return combined_gdf_nodes
 
 def add_nodes_to_spans(gdf_spans, gdf_nodes):
 
@@ -473,7 +491,7 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
     gdf_spans["end"] = gdf_spans["end"].apply(
         lambda x: json.dumps(convert_to_serializable(x)) if x is not None else None
     )
-
+    print("\n")
     return gdf_spans
 
 
@@ -634,25 +652,25 @@ def main():
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
     gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name)
-    print("Initial number of nodes:", gdf_ofds_nodes.size)
-    print("Initial number of spans:", gdf_spans.size)
+    print("Initial number of nodes:", len(gdf_ofds_nodes))
+    print("Initial number of spans:", len(gdf_spans))
 
     # Break spans at node points
     gdf_spans = break_spans_at_node_points(
         gdf_ofds_nodes, gdf_spans, network_name, network_id, network_links
     )
-    print("Number of spans after breaking at node points:", gdf_spans.size)
+    print("Number of spans after breaking at node points:", len(gdf_spans))
 
     # Check for any spans that do not have a node at the start or end point and add as needed
     gdf_ofds_nodes = add_missing_nodes(
         gdf_spans, gdf_ofds_nodes, network_id, network_name, network_links
     )
-    print("Final number of nodes:", gdf_ofds_nodes.size)
+    print("Final number of nodes:", len(gdf_ofds_nodes))
 
     # Add information on the start and end nodes to the spans
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
 
-    check_node_ids(gdf_ofds_nodes, gdf_ofds_spans)
+    # check_node_ids(gdf_ofds_nodes, gdf_ofds_spans)
     
     # Save the results to geojson files
     gdf_ofds_spans.to_file(spans_ofds_output, driver="GeoJSON")
