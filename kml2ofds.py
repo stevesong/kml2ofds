@@ -1,10 +1,22 @@
-from pykml import parser
+"""
+This script is used to KML files to the Open Fibre Data Standard format.
+It outputs two geojson files, one for network spans and one for nodes.
+Author: Steve Song
+Email:  steve@manypossibilities.net
+License: GPL 3.0
+Version: 0.1
+Date: 30-Mar-2024
+Usage: python kml2ofds.py
+"""
 import configparser
 from datetime import datetime
 import os
-import inquirer
 import json
+import uuid
+from collections import Counter
+from pykml import parser
 import numpy as np
+
 from shapely.geometry import (
     MultiPolygon,
     Point,
@@ -12,15 +24,15 @@ from shapely.geometry import (
     GeometryCollection,
     MultiPoint,
 )
-from shapely.ops import split, nearest_points, snap, unary_union
+from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
-import uuid
-from collections import Counter
+import inquirer
 
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 # import matplotlib.pyplot as plt
+
 
 def load_config(config_file):
     config = configparser.ConfigParser()
@@ -42,6 +54,7 @@ def load_config(config_file):
         'input_directory': input_directory,
         'output_directory': output_directory
     }
+
 
 def list_kml_files(directory):
     # List all .kml files in the given directory.
@@ -136,7 +149,6 @@ def process_document(document, network_id, network_name):
                 )
                 # Convert Shapely Point to GeoJSON
                 node_id = str(uuid.uuid4())
-
                 geojson_node = {
                     "type": "Feature",
                     "properties": {
@@ -171,6 +183,12 @@ def process_document(document, network_id, network_name):
 
             # Process Polylines
             polyline = placemark.find("{http://www.opengis.net/kml/2.2}LineString")
+            # Check to see if LineString is nested within MultiGeometry
+            if not polyline:
+                multi_geometry = placemark.find("{http://www.opengis.net/kml/2.2}MultiGeometry")
+                if multi_geometry is not None:
+                    polyline = multi_geometry.find("{http://www.opengis.net/kml/2.2}LineString")
+            
             if polyline is not None:
                 coordinates_text = polyline.find(
                     "{http://www.opengis.net/kml/2.2}coordinates"
@@ -219,7 +237,8 @@ def process_document(document, network_id, network_name):
 
 
 def snap_to_line(point, lines, tolerance=1e-4):
-    """Find the nearest line to a given point and find the nearest point on that line to the given point.
+    """Find the nearest line to a given point and find the 
+       nearest point on that line to the given point.
     """
 
     nearest_line = None
@@ -271,7 +290,7 @@ def break_spans_at_node_points(
     split_lines = []
     self_intersects = []
     self_intersect = []
-    featureType = "span"
+    feature_type = "span"
 
     # Iterate over the spans and find the nodes that intersect each span
     # breaking the spans into segments at each node intersection
@@ -322,7 +341,7 @@ def break_spans_at_node_points(
                         segment_uuid,
                         segment,
                         span_name,
-                        featureType,
+                        feature_type,
                         ", ".join(point_names),
                     )
                 )
@@ -330,12 +349,12 @@ def break_spans_at_node_points(
             # Generate a UUID for the original line if no intersection
             segment_uuid = str(uuid.uuid4())
             split_lines.append(
-                (segment_uuid, line_row.geometry, span_name, featureType, "")
+                (segment_uuid, line_row.geometry, span_name, feature_type, "")
             )
 
     # Create a new GeoDataFrame from the split linestrings
     gdf_spans = gpd.GeoDataFrame(
-        split_lines, columns=["id", "geometry", "name", "featureType", "point_names"]
+        split_lines, columns=["id", "geometry", "name", "feature_type", "point_names"]
     )
 
     # Add network metadata to the split spans GeoDataFrame
@@ -544,7 +563,7 @@ def append_node(new_node_coords, network_id, network_name, network_links):
         "geometry": {"type": "Point", "coordinates": new_node_coords},
         "properties": {
             "id": str(uuid.uuid4()),  # Generate a new UUID for the id
-            "name": "Auto generated missing node",  # You might want to generate a more descriptive name
+            "name": "Auto generated missing node",  
             "network": {"id": network_id, "name": network_name, "links": network_links},
             "featureType": "node",
         },
@@ -552,7 +571,8 @@ def append_node(new_node_coords, network_id, network_name, network_links):
 
 
 def update_network_field(row, network_name, network_id, network_links):
-    """Updates the 'network' field in the row's dictionary with 'id', 'name', and 'links' keys."""
+    """Updates the 'network' field in the row's dictionary 
+       with 'id', 'name', and 'links' keys."""
 
     if "network" not in row:
         # If 'network' does not exist, create it as a dictionary
@@ -728,6 +748,7 @@ def main():
     gdf_ofds_spans.to_file(spans_ofds_output, driver="GeoJSON")
     gdf_ofds_nodes.to_file(nodes_ofds_output, driver="GeoJSON")
     print("\nComplete")
+
 
 # main
 if __name__ == "__main__":
