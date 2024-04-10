@@ -30,6 +30,11 @@ from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
 import inquirer
+import libcoveofds
+
+from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
+from libcoveofds.schema import OFDSSchema
+from libcoveofds.jsonschemavalidate import JSONSchemaValidator
 
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
@@ -190,9 +195,16 @@ def process_document(document, network_id, network_name):
             )
             if multi_geometry is not None:
                 combined_coordinates = []
-                for line_string in multi_geometry.iter("{http://www.opengis.net/kml/2.2}LineString"):
-                    coordinates_text = line_string.find("{http://www.opengis.net/kml/2.2}coordinates").text
-                    coordinates = [tuple(map(float, coord.split(","))) for coord in coordinates_text.split()]
+                for line_string in multi_geometry.iter(
+                    "{http://www.opengis.net/kml/2.2}LineString"
+                ):
+                    coordinates_text = line_string.find(
+                        "{http://www.opengis.net/kml/2.2}coordinates"
+                    ).text
+                    coordinates = [
+                        tuple(map(float, coord.split(",")))
+                        for coord in coordinates_text.split()
+                    ]
                     combined_coordinates.extend(coordinates)
                 shapely_line = LineString(combined_coordinates)
                 if shapely_line is not None:
@@ -230,8 +242,9 @@ def process_document(document, network_id, network_name):
                     if not is_span_duplicate:
                         geojson_spans.append(geojson_span)
 
-                
-            elif placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None:
+            elif (
+                placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
+            ):
                 # Look for LineStrings
                 polyline = placemark.find("{http://www.opengis.net/kml/2.2}LineString")
                 if polyline is not None:
@@ -244,7 +257,7 @@ def process_document(document, network_id, network_name):
                     ]
                     # Convert to Shapely LineString
                     shapely_line = LineString(coordinates)
-                    
+
                     if shapely_line is not None:
                         # Convert Shapely LineString to GeoJSON
                         geojson_span = {
@@ -266,7 +279,9 @@ def process_document(document, network_id, network_name):
                             },
                             "geometry": {
                                 "type": "LineString",
-                                "coordinates": [(x, y) for x, y, *_ in shapely_line.coords],
+                                "coordinates": [
+                                    (x, y) for x, y, *_ in shapely_line.coords
+                                ],
                             },
                         }
                         # Check for duplicates before adding the GeoJSON object to the list
@@ -280,7 +295,6 @@ def process_document(document, network_id, network_name):
                         if not is_span_duplicate:
                             geojson_spans.append(geojson_span)
 
-        
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
 
@@ -340,7 +354,7 @@ def break_spans_at_node_points(
     self_intersects = []
     self_intersect = []
     feature_type = "span"
-    
+
     # Iterate over the spans and find the nodes that intersect each span
     # breaking the spans into segments at each node intersection
     for _, line_row in gdf_spans.iterrows():
@@ -454,7 +468,8 @@ def rejoin_self_intersection_breaks(split_lines, intersect_points):
                 )
                 i += 1  # Increment i by 1 to skip the next line
                 current_line = split_lines.geoms[i]
-                next_line = split_lines.geoms[i + 1]
+                if i + 1 < len(split_lines.geoms):
+                    next_line = split_lines.geoms[i + 1]
                 while (
                     current_line.coords[-1] == next_line.coords[0]
                     and intersect_points.contains(Point(next_line.coords[0]))
@@ -788,6 +803,15 @@ def main():
         + date_string
         + ".geojson"
     )
+    
+    ofds_json_output = (
+        output_directory
+        + network_filename_abbrev
+        + "_ofds-json_"
+        + date_string
+        + ".json"
+    )
+        
     base_name = os.path.splitext(os.path.basename(kml_fullpath))[0]
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
@@ -809,12 +833,36 @@ def main():
 
     # Add information on the start and end nodes to the spans
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
-
+   
     # check_node_ids(gdf_ofds_nodes, gdf_ofds_spans)
 
     # Save the results to geojson files
     gdf_ofds_spans.to_file(spans_ofds_output, driver="GeoJSON")
     gdf_ofds_nodes.to_file(nodes_ofds_output, driver="GeoJSON")
+
+    # ofds_spans_geojson = json.loads(gdf_ofds_spans.to_json(indent=None))
+    # ofds_nodes_geojson = json.loads(gdf_ofds_nodes.to_json(indent=None))
+
+    with open(spans_ofds_output, 'r') as file:
+        ofds_spans_geojson = json.load(file)
+    with open(nodes_ofds_output, 'r') as file:
+        ofds_nodes_geojson = json.load(file)
+
+    worker = GeoJSONToJSONConverter()
+    worker.process_data(ofds_nodes_geojson, assumed_feature_type=GeoJSONAssumeFeatureType.NODE)
+    worker.process_data(ofds_spans_geojson, assumed_feature_type=GeoJSONAssumeFeatureType.SPAN)
+
+    ofds_json = worker.get_json()
+
+    # Write the dictionary to a JSON file
+    with open(ofds_json_output, 'w') as json_file:
+        json.dump(ofds_json, json_file, indent=4)
+
+    schema = OFDSSchema()
+    worker = JSONSchemaValidator(schema)
+    out = worker.validate(ofds_json)
+    print([i.json() for i in out])    
+
     print("\nComplete")
 
 
