@@ -9,11 +9,12 @@ Core to OFDS is the principle that any span of fibre must be terminated at eithe
 As such, KML2OFDS expects a KML file that contains both fibre optic routes as well as points of presence.
 
 In broad strokes the script:
-    * parses a KML document for features and separates them into a collection of nodes (any point feature in the KML) and spans (any LineString or collection of LineStrings) in the KML
-    * if they are not already somewhere on a span, the script snaps nodes to the closest point on the closest span
-    * it then breaks each span at every point where a node intersects a span, resulting in a larger number of shorter spans
-    * a node is then associated with the "start" and "end" of each of the spans
-    * at the moment on the most basic meta data is added during the export process
+
+* parses a KML document for features and separates them into a collection of nodes (any point feature in the KML) and spans (any LineString or collection of LineStrings) in the KML;
+* the script snaps nodes to the closest point on the closest span, if they are not already somewhere on a span;
+* it then breaks each span at every point where a node intersects a span, resulting in a larger number of shorter spans;
+* a node is then associated each with the "start" and "end" of each of the spans; and,
+* adds meta data to the spans and nodes. at the moment on the most basic meta data is added during the export process
 
 [ofds-repo]: <https://github.com/Open-Telecoms-Data/open-fibre-data-standard>
 [ofds-docs]: <https://open-fibre-data-standard.readthedocs.io/en/latest/reference/schema.html>
