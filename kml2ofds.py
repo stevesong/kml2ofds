@@ -533,6 +533,8 @@ def add_missing_nodes(
         print(
             f"Number of gdf_nodes after adding missing nodes: {len(combined_gdf_nodes)}"
         )
+    else:
+        combined_gdf_nodes = gdf_nodes
 
     return combined_gdf_nodes
 
@@ -859,11 +861,13 @@ def main():
         json.dump(ofds_json, json_file, indent=4)
 
     schema = OFDSSchema()
-    worker = JSONSchemaValidator(schema)
-    out = worker.validate(ofds_json)
+    schema_worker = JSONSchemaValidator(schema)
+    out = schema_worker.validate(ofds_json)
+    print("\nValidating schema...")
     print([i.json() for i in out])    
+    print(worker.get_meta_json())
 
-    print("\nComplete")
+    print("Complete")
 
 
 # main
