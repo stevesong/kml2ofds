@@ -18,7 +18,6 @@ import sys
 from collections import Counter
 from pykml import parser
 import numpy as np
-
 from shapely.geometry import (
     MultiPolygon,
     Point,
@@ -30,8 +29,6 @@ from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
 import inquirer
-import libcoveofds
-
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
@@ -80,6 +77,28 @@ def select_file(files):
     ]
     answers = inquirer.prompt(questions)
     return answers["file"]
+
+def prompt_for_network(default_network_name):
+    # Prompt the user for the network name
+    questions = [
+        inquirer.Text(
+            'network_name',
+            message=f"Enter the network name (default: {default_network_name}):",
+            default=""
+        ),
+        inquirer.Confirm(
+            'confirm',
+            message='Is this correct?',
+            default=True
+        )
+    ]
+    answers = inquirer.prompt(questions)
+
+    if not answers['confirm']:
+        # If the user didn't confirm, recursively call the function to prompt again
+        return prompt_for_network(default_network_name)
+
+    return answers['network_name']
 
 
 def process_kml(filename, network_id, network_name):
@@ -787,8 +806,9 @@ def main():
     kml_file = select_file(kml_files)
     kml_fullpath = os.path.join(directory, kml_file)
 
+    network_name = prompt_for_network(network_name)
+    
     # set file names
-
     network_filename_normalised = kml_file.replace(" ", "_").upper()
     network_filename_abbrev = network_filename_normalised[:3]
     nodes_ofds_output = (
