@@ -45,6 +45,7 @@ def load_config(config_file):
     network_name = config.get("DEFAULT", "network_name")
     network_id = config.get("DEFAULT", "network_id")
     network_links = config.get("DEFAULT", "network_links")
+    ignore_placemarks_array = config.get("DEFAULT", "ignore_placemarks")
 
     # Accessing values under a specific section
     input_directory = config.get("DIRECTORY", "input_directory")
@@ -56,6 +57,7 @@ def load_config(config_file):
         "network_links": network_links,
         "input_directory": input_directory,
         "output_directory": output_directory,
+        "ignore_placemarks": ignore_placemarks_array
     }
 
 
@@ -101,7 +103,7 @@ def prompt_for_network(default_network_name):
     return answers['network_name']
 
 
-def process_kml(filename, network_id, network_name):
+def process_kml(filename, network_id, network_name, ignore_placemarks):
     with open(filename) as f:
         kml_doc = parser.parse(f).getroot()
     geojson_nodes = []
@@ -110,7 +112,7 @@ def process_kml(filename, network_id, network_name):
     # First look for multiple Documents within the KML file.
     for document in kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"):
         print(f"Found document: {document.name.text}")
-        nodes, spans = process_document(document, network_id, network_name)
+        nodes, spans = process_document(document, network_id, network_name, ignore_placemarks)
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
 
@@ -134,7 +136,7 @@ def process_kml(filename, network_id, network_name):
     return gdf_ofds_nodes, gdf_spans
 
 
-def process_document(document, network_id, network_name):
+def process_document(document, network_id, network_name, ignore_placemarks):
     """Process a KML Document and return a list of GeoJSON nodes and spans.
 
     Args:
@@ -204,8 +206,25 @@ def process_document(document, network_id, network_name):
                     == geojson_node["geometry"]["coordinates"]
                     for node in geojson_nodes
                 )
-                # If not already there, add the GeoJSON object to the list
-                if not is_duplicate:
+                
+                # If not already there and the placemark name is not found 
+                # in the ignore_placemarks array add the GeoJSON object to 
+                # the list
+                
+                is_ignored = False
+        
+                for ignore_pattern in ignore_placemarks:
+                    if ignore_pattern.endswith("*"):
+                        if name.startswith(ignore_pattern[:-1]):
+                            is_ignored = True
+                            break
+                    elif name == ignore_pattern:
+                        is_ignored = True
+                        break
+                    if is_ignored:
+                        print(f"Ignoring placemark: {name}")
+
+                if not is_duplicate and not is_ignored:
                     geojson_nodes.append(geojson_node)
 
             # Look for MultiGeometry elements
@@ -779,6 +798,12 @@ def main():
         network_link_url = config_values["network_links"]
 
     network_links = [{"rel": "describedby", "href": network_link_url}]
+    
+    if not config_values["ignore_placemarks"]:
+        ignore_placemarks = []
+    else:
+        ignore_placemarks = config_values["ignore_placemarks"].split(";")
+        
     # output files
     today = datetime.today()
     date_string = today.strftime("%d%b%Y").lower()
@@ -840,7 +865,7 @@ def main():
     base_name = os.path.splitext(os.path.basename(kml_fullpath))[0]
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
-    gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name)
+    gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name, ignore_placemarks)
     print("Initial number of nodes:", len(gdf_ofds_nodes))
     print("Initial number of spans:", len(gdf_spans))
 
