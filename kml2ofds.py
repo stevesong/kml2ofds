@@ -14,7 +14,6 @@ from datetime import datetime
 import os
 import json
 import uuid
-import sys
 from collections import Counter
 from pykml import parser
 import numpy as np
@@ -63,6 +62,7 @@ def load_config(config_file):
 def list_kml_files(directory):
     # List all .kml files in the given directory.
     kml_files = [f for f in os.listdir(directory) if f.endswith(".kml")]
+    kml_files.sort(key=lambda f: os.path.getmtime(os.path.join(directory, f)), reverse=True)
     return kml_files
 
 
