@@ -275,7 +275,10 @@ def process_document(document, network_id, network_name):
                         for coord in coordinates_text.split()
                     ]
                     # Convert to Shapely LineString
-                    shapely_line = LineString(coordinates)
+                    # ignore linestrings with only one point
+                    if len(coordinates) > 1:
+                        shapely_line = LineString(coordinates)
+
 
                     if shapely_line is not None:
                         # Convert Shapely LineString to GeoJSON
