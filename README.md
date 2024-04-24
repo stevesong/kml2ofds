@@ -11,6 +11,7 @@ As such, KML2OFDS expects a KML file that contains both fibre optic routes as we
 In broad strokes the script:
 
 * parses a KML document for features and separates them into a collection of nodes (any point feature in the KML) and spans (any LineString or collection of LineStrings) in the KML;
+* checks for duplicate nodes based on a combination of node 'name' and node latitude, longitude based on an adjustable level of location precision
 * the script snaps nodes to the closest point on the closest span, if they are not already somewhere on a span;
 * it then breaks each span at every point where a node intersects a span, resulting in a larger number of shorter spans;
 * a node is then associated each with the "start" and "end" of each of the spans; and,

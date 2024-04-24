@@ -4,8 +4,7 @@ It outputs two geojson files, one for network spans and one for nodes.
 Author: Steve Song
 Email:  steve@manypossibilities.net
 License: GPL 3.0
-Version: 0.1
-Date: 30-Mar-2024
+Date: 24-Mar-2024
 Usage: python kml2ofds.py
 """
 
@@ -115,6 +114,10 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
         nodes, spans = process_document(document, network_id, network_name, ignore_placemarks)
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
+    
+    print(f"Number of nodes priot to dedup: {len(geojson_nodes)}")
+    geojson_nodes = remove_duplicate_nodes(geojson_nodes, 2)
+    print(f"Number of nodes after dedup: {len(geojson_nodes)}")
 
     gdf_nodes = gpd.GeoDataFrame.from_features(geojson_nodes)
     gdf_spans = gpd.GeoDataFrame.from_features(geojson_spans)
@@ -135,6 +138,25 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
     )
     return gdf_ofds_nodes, gdf_spans
 
+def remove_duplicate_nodes(geojson_nodes, precision):
+    """
+    Removes duplicate nodes from the list of GeoJSON nodes based on a specified precision.
+    """
+    unique_nodes = []
+    seen_hashes = set()
+    for node in geojson_nodes:
+        # Create a hash based on the rounded coordinates
+        node_hash = hash((
+            node["properties"]["name"],
+            round(node["geometry"]["coordinates"][0], precision),
+            round(node["geometry"]["coordinates"][1], precision)
+        ))
+        if node_hash not in seen_hashes:
+            # If the hash is not seen before, add the node to the list of unique nodes
+            unique_nodes.append(node)
+            # Add the hash to the set of seen hashes
+            seen_hashes.add(node_hash)
+    return unique_nodes
 
 def process_document(document, network_id, network_name, ignore_placemarks):
     """Process a KML Document and return a list of GeoJSON nodes and spans.
@@ -203,21 +225,21 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                 # Check for duplicates before adding the
                 # GeoJSON object to the list
 
-                is_duplicate = False
-                is_duplicate = any(
-                    node["properties"]["name"].strip() == name.strip()
-                    and round(node["geometry"]["coordinates"][0], 4)
-                    == round(geojson_node["geometry"]["coordinates"][0], 4)
-                    and round(node["geometry"]["coordinates"][1], 4)
-                    == round(geojson_node["geometry"]["coordinates"][1], 4)
-                    for node in geojson_nodes
-                )
+                # is_duplicate = False
+                # is_duplicate = any(
+                #     node["properties"]["name"].strip() == name.strip()
+                #     and round(node["geometry"]["coordinates"][0], 4)
+                #     == round(geojson_node["geometry"]["coordinates"][0], 4)
+                #     and round(node["geometry"]["coordinates"][1], 4)
+                #     == round(geojson_node["geometry"]["coordinates"][1], 4)
+                #     for node in geojson_nodes
+                # )
 
-                if geojson_node["properties"]["name"] == "Bomet Station":
-                    x = round(geojson_node["geometry"]["coordinates"][0], 4)
-                    y = round(geojson_node["geometry"]["coordinates"][1], 4)
-                    print(f"Found: {name}, {x}, {y}")
-                    print(f"Duplicate: {is_duplicate}")
+                # if geojson_node["properties"]["name"] == "Bomet Station":
+                #     x = round(geojson_node["geometry"]["coordinates"][0], 4)
+                #     y = round(geojson_node["geometry"]["coordinates"][1], 4)
+                #     print(f"Found: {name}, {x}, {y}")
+                #     print(f"Duplicate: {is_duplicate}")
 
                 # if is_duplicate:
                 #     print(f"Duplicate placemark: {name}, {shapely_point.x}, {shapely_point.y}")
@@ -239,7 +261,7 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                     if is_ignored:
                         print(f"Ignoring placemark: {name}")
 
-                if not is_duplicate and not is_ignored:
+                if not is_ignored:
                     geojson_nodes.append(geojson_node)
 
             # Look for MultiGeometry elements
@@ -352,7 +374,6 @@ def process_document(document, network_id, network_name, ignore_placemarks):
 
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
-
 
 def snap_to_line(point, lines, tolerance=1e-4):
     """Find the nearest line to a given point and find the
@@ -880,6 +901,7 @@ def main():
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
     gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name, ignore_placemarks)
+    
     print("Initial number of nodes:", len(gdf_ofds_nodes))
     print("Initial number of spans:", len(gdf_spans))
 
