@@ -27,6 +27,7 @@ from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
 import inquirer
+import re
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
@@ -110,14 +111,18 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
     # Start processing from the root Document
     # First look for multiple Documents within the KML file.
     for document in kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"):
-        print(f"Found document: {document.name.text}")
+        # print(
+        #     f"Found document: {document.name.text}",
+        #     end="",
+        #     flush=True,
+        # )
+
         nodes, spans = process_document(document, network_id, network_name, ignore_placemarks)
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
     
     print(f"Number of nodes priot to dedup: {len(geojson_nodes)}")
     geojson_nodes = remove_duplicate_nodes(geojson_nodes, 2)
-    print(f"Number of nodes after dedup: {len(geojson_nodes)}")
 
     gdf_nodes = gpd.GeoDataFrame.from_features(geojson_nodes)
     gdf_spans = gpd.GeoDataFrame.from_features(geojson_spans)
@@ -222,44 +227,17 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                         "coordinates": [shapely_point.x, shapely_point.y],
                     },
                 }
-                # Check for duplicates before adding the
-                # GeoJSON object to the list
 
-                # is_duplicate = False
-                # is_duplicate = any(
-                #     node["properties"]["name"].strip() == name.strip()
-                #     and round(node["geometry"]["coordinates"][0], 4)
-                #     == round(geojson_node["geometry"]["coordinates"][0], 4)
-                #     and round(node["geometry"]["coordinates"][1], 4)
-                #     == round(geojson_node["geometry"]["coordinates"][1], 4)
-                #     for node in geojson_nodes
-                # )
-
-                # if geojson_node["properties"]["name"] == "Bomet Station":
-                #     x = round(geojson_node["geometry"]["coordinates"][0], 4)
-                #     y = round(geojson_node["geometry"]["coordinates"][1], 4)
-                #     print(f"Found: {name}, {x}, {y}")
-                #     print(f"Duplicate: {is_duplicate}")
-
-                # if is_duplicate:
-                #     print(f"Duplicate placemark: {name}, {shapely_point.x}, {shapely_point.y}")
-
-                # If not already there and the placemark name is not found
-                # in the ignore_placemarks array add the GeoJSON object to
-                # the list
+                # If name does not match an element in the ignore_placemarks
+                # array, add the GeoJSON object to the list
 
                 is_ignored = False
 
                 for ignore_pattern in ignore_placemarks:
-                    if ignore_pattern.endswith("*"):
-                        if name.startswith(ignore_pattern[:-1]):
-                            is_ignored = True
-                            break
-                    elif name == ignore_pattern:
+                    if re.search(fr"{ignore_pattern}", name):
+                        print(f"Pattern: {ignore_pattern} matched placemark: {name}")
                         is_ignored = True
                         break
-                    if is_ignored:
-                        print(f"Ignoring placemark: {name}")
 
                 if not is_ignored:
                     geojson_nodes.append(geojson_node)
@@ -602,9 +580,6 @@ def add_missing_nodes(
     if new_nodes:
         # print(new_nodes[:5])
         new_nodes_gdf = gpd.GeoDataFrame.from_features(new_nodes, crs=gdf_nodes.crs)
-        print(f"Adding {len(new_nodes)} missing nodes")
-        print(f"Number of records in new_nodes_gdf: {len(new_nodes_gdf)}")
-        print(f"Number of gdf_nodes prior to adding missing nodes: {len(gdf_nodes)}")
         combined_gdf_nodes = pd.concat([gdf_nodes, new_nodes_gdf], ignore_index=True)
         print(
             f"Number of gdf_nodes after adding missing nodes: {len(combined_gdf_nodes)}"
