@@ -151,7 +151,8 @@ def process_document(document, network_id, network_name, ignore_placemarks):
 
     # Process Folders within the Document
     for folder in document.iter("{http://www.opengis.net/kml/2.2}Folder"):
-        print(f"Found folder: {folder.name.text}")
+        # print(f"Found folder: {folder.name.text}")
+
         # Process Placemarks within this Folder
         for placemark in folder.iter("{http://www.opengis.net/kml/2.2}Placemark"):
 
@@ -199,20 +200,34 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                         "coordinates": [shapely_point.x, shapely_point.y],
                     },
                 }
-                # Check for duplicates before adding the GeoJSON object to the list
+                # Check for duplicates before adding the
+                # GeoJSON object to the list
+
+                is_duplicate = False
                 is_duplicate = any(
-                    node["properties"]["name"] == name
-                    and node["geometry"]["coordinates"]
-                    == geojson_node["geometry"]["coordinates"]
+                    node["properties"]["name"].strip() == name.strip()
+                    and round(node["geometry"]["coordinates"][0], 4)
+                    == round(geojson_node["geometry"]["coordinates"][0], 4)
+                    and round(node["geometry"]["coordinates"][1], 4)
+                    == round(geojson_node["geometry"]["coordinates"][1], 4)
                     for node in geojson_nodes
                 )
-                
-                # If not already there and the placemark name is not found 
-                # in the ignore_placemarks array add the GeoJSON object to 
+
+                if geojson_node["properties"]["name"] == "Bomet Station":
+                    x = round(geojson_node["geometry"]["coordinates"][0], 4)
+                    y = round(geojson_node["geometry"]["coordinates"][1], 4)
+                    print(f"Found: {name}, {x}, {y}")
+                    print(f"Duplicate: {is_duplicate}")
+
+                # if is_duplicate:
+                #     print(f"Duplicate placemark: {name}, {shapely_point.x}, {shapely_point.y}")
+
+                # If not already there and the placemark name is not found
+                # in the ignore_placemarks array add the GeoJSON object to
                 # the list
-                
+
                 is_ignored = False
-        
+
                 for ignore_pattern in ignore_placemarks:
                     if ignore_pattern.endswith("*"):
                         if name.startswith(ignore_pattern[:-1]):
@@ -297,7 +312,6 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                     # ignore linestrings with only one point
                     if len(coordinates) > 1:
                         shapely_line = LineString(coordinates)
-
 
                     if shapely_line is not None:
                         # Convert Shapely LineString to GeoJSON
