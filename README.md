@@ -17,5 +17,48 @@ In broad strokes the script:
 * a node is then associated each with the "start" and "end" of each of the spans; and,
 * adds meta data to the spans and nodes. at the moment on the most basic meta data is added during the export process
 
+## Install kml2ofds
+
+### Using pipx
+
+The recommended way to install `kml2ofds` as a user is with [pipx][pipx].
+
+First ensure [pipx is installed](https://pipx.pypa.io/stable/#install-pipx), then to install the latest `kml2ofds`:
+
+```sh
+pipx install git+https://github.com/stevesong/kml2ofds.git@main
+```
+
+and then the command should be available to use (you may need to restart your shell):
+
+```sh
+kml2ofds [--options]
+```
+
+### Using pip
+
+To install `kml2ofds` inside an existing python virtual environment or conda environment:
+
+```sh
+# First activate your environment, then:
+pip install git+https://github.com/stevesong/kml2ofds.git@main
+```
+
+## Developing kml2ofds
+
+To test running `kml2ofds` while developing, it's necessary to install the package as editable using `pip -e`, e.g.:
+
+```sh
+cd path/to/kml2ofds/
+source .venv/bin/activate # If using a python virtual environment
+
+# Install as editable
+pip install -e .
+```
+
+To add, remove or update requirements, edit the dependencies section in `pyproject.toml`, then run `pip install -e .` again to update the dependencies in your virtual environment.
+
+
 [ofds-repo]: <https://github.com/Open-Telecoms-Data/open-fibre-data-standard>
 [ofds-docs]: <https://open-fibre-data-standard.readthedocs.io/en/latest/reference/schema.html>
+[pipx]: <https://github.com/pypa/pipx/>
