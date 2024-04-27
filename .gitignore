@@ -8,4 +8,4 @@ __pycache__/
 .vscode/
 __pycache__/test_parse.cpython-311-pytest-8.0.2.pyc
 kml2ofds-testing.qgz
-
+dist/
