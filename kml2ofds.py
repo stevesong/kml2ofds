@@ -676,7 +676,7 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Flatten the list of lists and remove duplicates
     close_pairs_indices = [(i, j) for sublist in close_pairs_indices for i in sublist for j in sublist if i != j]
     unique_pairs = list(set((min(i, j), max(i, j)) for i, j in close_pairs_indices))
-    print(f"Number of close pairs: {len(unique_pairs)}")
+    print(f"\nNumber of close pairs: {len(unique_pairs)}")
     
     # Update the spans with the merged nodes
     merged_node_ids = []
@@ -688,9 +688,28 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
             if start_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
                 start_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+
+                # update the span geometry to match the merged node
+                new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
+                span_geometry = span['geometry']
+                updated_coords = list(span_geometry.coords)
+                updated_coords[0] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                span_geometry = LineString(updated_coords)
+                # Assign the updated geometry back to the span
+                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
+                
             elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
                 end_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+
+                # update the span geometry to match the merged node
+                new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
+                span_geometry = span['geometry']
+                updated_coords = list(span_geometry.coords)
+                updated_coords[-1] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                span_geometry = LineString(updated_coords)
+                # Assign the updated geometry back to the span
+                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
         
         # Convert the updated dictionaries back into JSON strings
         start_json = json.dumps(convert_to_serializable(start_dict))
