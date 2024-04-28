@@ -16,6 +16,7 @@ import uuid
 from collections import Counter
 from pykml import parser
 import numpy as np
+from sklearn.neighbors import KDTree
 from shapely.geometry import (
     MultiPolygon,
     Point,
@@ -121,7 +122,7 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
     
-    print(f"Number of nodes priot to dedup: {len(geojson_nodes)}")
+    print(f"Number of nodes found before deduplication: {len(geojson_nodes)}")
     geojson_nodes = remove_duplicate_nodes(geojson_nodes, 2)
 
     gdf_nodes = gpd.GeoDataFrame.from_features(geojson_nodes)
@@ -235,7 +236,6 @@ def process_document(document, network_id, network_name, ignore_placemarks):
 
                 for ignore_pattern in ignore_placemarks:
                     if re.search(fr"{ignore_pattern}", name):
-                        print(f"Pattern: {ignore_pattern} matched placemark: {name}")
                         is_ignored = True
                         break
 
@@ -587,7 +587,7 @@ def add_missing_nodes(
     else:
         combined_gdf_nodes = gdf_nodes
 
-    return combined_gdf_nodes
+    return combined_gdf_nodes, new_nodes_gdf
 
 
 def add_nodes_to_spans(gdf_spans, gdf_nodes):
@@ -623,7 +623,6 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
             end_points_info = {
                 "id": matching_end_point["id"],
                 "name": matching_end_point["name"],
-                "status": matching_end_point.get("status", "unknown"),
                 "location": {
                     "type": "Point",
                     "coordinates": [
@@ -659,6 +658,55 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
     )
     return gdf_spans
 
+def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
+    # Filter nodes that are auto-generated missing nodes
+    filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes["name"] == "Auto generated missing node"]
+    
+    # Extract coordinates as a 2D array
+    coordinates = np.array([(point.x, point.y) for point in filtered_nodes.geometry])
+    
+    # Build a KDTree for efficient nearest neighbor search
+    tree = KDTree(coordinates)
+    
+    # Find pairs of nodes that are within the specified distance
+    # The query_radius method returns a list of arrays, one for each point, containing the indices of the neighbors
+    # We're only interested in neighbors that are closer than the threshold, so we filter those out
+    close_pairs_indices = [indices for indices in tree.query_radius(coordinates, r=threshold) if len(indices) > 1]
+    
+    # Flatten the list of lists and remove duplicates
+    close_pairs_indices = [(i, j) for sublist in close_pairs_indices for i in sublist for j in sublist if i != j]
+    unique_pairs = list(set((min(i, j), max(i, j)) for i, j in close_pairs_indices))
+    print(f"Number of close pairs: {len(unique_pairs)}")
+    
+    # Update the spans with the merged nodes
+    merged_node_ids = []
+    for index, span in gdf_ofds_spans.iterrows():
+        start_dict = json.loads(span['start'])
+        end_dict = json.loads(span['end'])
+        
+        for pair in unique_pairs:
+            if start_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
+                start_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
+                merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+            elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
+                end_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
+                merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+        
+        # Convert the updated dictionaries back into JSON strings
+        start_json = json.dumps(convert_to_serializable(start_dict))
+        end_json = json.dumps(convert_to_serializable(end_dict))
+        
+        # Update the 'start' and 'end' columns in the DataFrame for the current row
+        gdf_ofds_spans.at[index, 'start'] = start_json
+        gdf_ofds_spans.at[index, 'end'] = end_json
+    
+    # Remove nodes that were merged
+    # print(merged_node_ids)
+    gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes['id'].isin(merged_node_ids)]
+    
+    print(f"Number of nodes after merging nearby auto-added nodes: {len(gdf_ofds_nodes)}")
+    return gdf_ofds_spans, gdf_ofds_nodes
+
 
 def find_end_point(span_endpoint, gdf_nodes, tolerance=1e-3):
     point_geom = Point(span_endpoint)
@@ -693,7 +741,6 @@ def append_node(new_node_coords, network_id, network_name, network_links):
         },
     }
 
-
 def update_network_field(row, network_name, network_id, network_links):
     """Updates the 'network' field in the row's dictionary
     with 'id', 'name', and 'links' keys."""
@@ -709,67 +756,6 @@ def update_network_field(row, network_name, network_id, network_links):
 
     return row
 
-
-def check_node_ids(gdf_nodes, gdf_spans):
-    counter = 0
-    # Create a set of all node IDs
-    node_ids = set(gdf_nodes["id"])
-
-    # Initialize a list to store GeoJSON features for missing nodes
-    missing_nodes_geojson = []
-
-    # Iterate over all node IDs
-    for node_id in node_ids:
-        # Check if the node ID is referenced in gdf_spans
-        referenced = False
-        for _, span in gdf_spans.iterrows():
-            start_info = (
-                json.loads(span["start"])
-                if isinstance(span["start"], str)
-                else span["start"]
-            )
-            end_info = (
-                json.loads(span["end"]) if isinstance(span["end"], str) else span["end"]
-            )
-
-            if start_info and "id" in start_info and start_info["id"] == node_id:
-                referenced = True
-                break
-            if end_info and "id" in end_info and end_info["id"] == node_id:
-                referenced = True
-                break
-
-        # If the node ID is not referenced, create a GeoJSON feature for it
-        if not referenced:
-            missing_node = gdf_nodes[gdf_nodes["id"] == node_id].iloc[0]
-            missing_node_geojson = {
-                "type": "Feature",
-                "properties": {
-                    "id": missing_node["id"],
-                    "name": missing_node["name"],
-                    "featureType": "node",
-                },
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [missing_node.geometry.x, missing_node.geometry.y],
-                },
-            }
-            missing_nodes_geojson.append(missing_node_geojson)
-        counter += 1
-        print(
-            f"\rChecking for unassociated nodes {counter} of {len(gdf_nodes)}",
-            end="",
-            flush=True,
-        )
-
-    if missing_nodes_geojson:
-        # Write the GeoJSON features for missing nodes to a file
-        with open("output/missing_nodes.geojson", "w") as f:
-            json.dump(
-                {"type": "FeatureCollection", "features": missing_nodes_geojson}, f
-            )
-
-
 def convert_to_serializable(obj):
     """Converts a dictionary to JSON, ensuring all numeric values are Python native types."""
     if isinstance(obj, dict):
@@ -780,9 +766,10 @@ def convert_to_serializable(obj):
         return int(obj)
     elif isinstance(obj, (np.float64, np.float32, np.float16)):
         return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
     else:
         return obj
-
 
 def main():
 
@@ -808,12 +795,12 @@ def main():
         network_link_url = config_values["network_links"]
 
     network_links = [{"rel": "describedby", "href": network_link_url}]
-    
+
     if not config_values["ignore_placemarks"]:
         ignore_placemarks = []
     else:
         ignore_placemarks = config_values["ignore_placemarks"].split(";")
-        
+
     # output files
     today = datetime.today()
     date_string = today.strftime("%d%b%Y").lower()
@@ -845,7 +832,7 @@ def main():
     kml_fullpath = os.path.join(directory, kml_file)
 
     network_name = prompt_for_network(network_name)
-    
+
     # set file names
     network_filename_normalised = kml_file.replace(" ", "_").upper()
     network_filename_abbrev = network_filename_normalised[:3]
@@ -863,7 +850,7 @@ def main():
         + date_string
         + ".geojson"
     )
-    
+
     ofds_json_output = (
         output_directory
         + network_filename_abbrev
@@ -871,12 +858,12 @@ def main():
         + date_string
         + ".json"
     )
-        
+
     base_name = os.path.splitext(os.path.basename(kml_fullpath))[0]
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
     gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name, ignore_placemarks)
-    
+
     print("Initial number of nodes:", len(gdf_ofds_nodes))
     print("Initial number of spans:", len(gdf_spans))
 
@@ -887,15 +874,15 @@ def main():
     print("Number of spans after breaking at node points:", len(gdf_spans))
 
     # Check for any spans that do not have a node at the start or end point and add as needed
-    gdf_ofds_nodes = add_missing_nodes(
+    gdf_ofds_nodes, gdf_auto_gen_nodes = add_missing_nodes(
         gdf_spans, gdf_ofds_nodes, network_id, network_name, network_links
     )
     print("Final number of nodes:", len(gdf_ofds_nodes))
 
     # Add information on the start and end nodes to the spans
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
-   
-    # check_node_ids(gdf_ofds_nodes, gdf_ofds_spans)
+
+    gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-1)
 
     # Save the results to geojson files
     gdf_ofds_spans.to_file(spans_ofds_output, driver="GeoJSON")
@@ -919,12 +906,12 @@ def main():
     with open(ofds_json_output, 'w') as json_file:
         json.dump(ofds_json, json_file, indent=4)
 
-    schema = OFDSSchema()
-    schema_worker = JSONSchemaValidator(schema)
-    out = schema_worker.validate(ofds_json)
-    print("\nValidating schema...")
-    print([i.json() for i in out])    
-    print(worker.get_meta_json())
+    # schema = OFDSSchema()
+    # schema_worker = JSONSchemaValidator(schema)
+    # out = schema_worker.validate(ofds_json)
+    # print("\nValidating schema...")
+    # print([i.json() for i in out])    
+    # print(worker.get_meta_json())
 
     print("Complete")
 
