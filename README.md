@@ -14,8 +14,11 @@ In broad strokes the script:
 * checks for duplicate nodes based on a combination of node 'name' and node latitude, longitude based on an adjustable level of location precision
 * the script snaps nodes to the closest point on the closest span, if they are not already somewhere on a span;
 * it then breaks each span at every point where a node intersects a span, resulting in a larger number of shorter spans;
-* a node is then associated each with the "start" and "end" of each of the spans; and,
+* a node is then associated each with the "start" and "end" of each of the spans; 
+* where a span doesn't have a node at the start or end, a node is auto generated in order to comply with the OFDS standard;
 * adds meta data to the spans and nodes. at the moment on the most basic meta data is added during the export process
+* where two auto-generated nodes are found in close proximity, it is assumed that the spans they are connected to should be joined, the two nodes are merged and the end points of the spans connect to the merged node;
+
 
 ## Install kml2ofds
 

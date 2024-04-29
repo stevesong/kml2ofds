@@ -660,6 +660,8 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
 
 def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
+    print("Merging auto-generated nodes that are in close proximity to each other...")
+    
     filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes["name"] == "Auto generated missing node"]
     
     # Extract coordinates as a 2D array
@@ -725,6 +727,75 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     
     print(f"Number of nodes after merging nearby auto-added nodes: {len(gdf_ofds_nodes)}")
     return gdf_ofds_spans, gdf_ofds_nodes
+
+def merge_nearby_auto_gen_and_propoer_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
+    # Filter nodes that are auto-generated missing nodes
+    print("Merging auto-generated nodes that are in close proximity to a known node...")
+    
+    # Extract coordinates as a 2D array
+    coordinates = np.array([(point.x, point.y) for point in gdf_ofds_nodes.geometry])
+    
+    # Build a KDTree for efficient nearest neighbor search
+    tree = KDTree(coordinates)
+    
+    # Find pairs of nodes that are within the specified distance
+    # The query_radius method returns a list of arrays, one for each point, containing the indices of the neighbors
+    # We're only interested in neighbors that are closer than the threshold, so we filter those out
+    close_pairs_indices = [indices for indices in tree.query_radius(coordinates, r=threshold) if len(indices) > 1]
+    
+    # Flatten the list of lists and remove duplicates
+    close_pairs_indices = [(i, j) for sublist in close_pairs_indices for i in sublist for j in sublist if i != j]
+    unique_pairs = list(set((min(i, j), max(i, j)) for i, j in close_pairs_indices))
+    print(f"\nNumber of close pairs: {len(unique_pairs)}")
+    
+    # Update the spans with the merged nodes
+    merged_node_ids = []
+    for index, span in gdf_ofds_spans.iterrows():
+        start_dict = json.loads(span['start'])
+        end_dict = json.loads(span['end'])
+        
+        for pair in unique_pairs:
+            if start_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
+                start_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
+                merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+
+                # update the span geometry to match the merged node
+                new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
+                span_geometry = span['geometry']
+                updated_coords = list(span_geometry.coords)
+                updated_coords[0] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                span_geometry = LineString(updated_coords)
+                # Assign the updated geometry back to the span
+                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
+                
+            elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
+                end_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
+                merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+
+                # update the span geometry to match the merged node
+                new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
+                span_geometry = span['geometry']
+                updated_coords = list(span_geometry.coords)
+                updated_coords[-1] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                span_geometry = LineString(updated_coords)
+                # Assign the updated geometry back to the span
+                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
+        
+        # Convert the updated dictionaries back into JSON strings
+        start_json = json.dumps(convert_to_serializable(start_dict))
+        end_json = json.dumps(convert_to_serializable(end_dict))
+        
+        # Update the 'start' and 'end' columns in the DataFrame for the current row
+        gdf_ofds_spans.at[index, 'start'] = start_json
+        gdf_ofds_spans.at[index, 'end'] = end_json
+    
+    # Remove nodes that were merged
+    # print(merged_node_ids)
+    gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes['id'].isin(merged_node_ids)]
+    
+    print(f"Number of nodes after merging nearby auto-added nodes: {len(gdf_ofds_nodes)}")
+    return gdf_ofds_spans, gdf_ofds_nodes
+
 
 
 def find_end_point(span_endpoint, gdf_nodes, tolerance=1e-3):
