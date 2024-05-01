@@ -9,3 +9,5 @@ __pycache__/
 __pycache__/test_parse.cpython-311-pytest-8.0.2.pyc
 kml2ofds-testing.qgz
 dist/
+.venv/
+.gitignore
