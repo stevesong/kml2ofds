@@ -11,3 +11,4 @@ kml2ofds-testing.qgz
 dist/
 .venv/
 .gitignore
+nofbi.profile

@@ -8,6 +8,7 @@ Date: 24-Mar-2024
 Usage: python kml2ofds.py
 """
 
+import click
 import configparser
 from datetime import datetime
 import os
@@ -17,7 +18,6 @@ from collections import Counter
 from pykml import parser
 import numpy as np
 from sklearn.neighbors import KDTree
-# from scikit_learn.neighbors import KDTree
 from shapely.geometry import (
     MultiPolygon,
     Point,
@@ -664,7 +664,6 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     print("\nMerging auto-generated nodes that are in close proximity to each other...")
     
     filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes["name"] == "Auto generated missing node"]
-    
     # Extract coordinates as a 2D array
     coordinates = np.array([(point.x, point.y) for point in filtered_nodes.geometry])
     
@@ -689,7 +688,7 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
         
         for pair in unique_pairs:
             if start_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
-                start_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
+                start_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
 
                 # update the span geometry to match the merged node
@@ -702,7 +701,7 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
                 gdf_ofds_spans.at[index, 'geometry'] = span_geometry
                 
             elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
-                end_dict['id'] = filtered_nodes.iloc[pair[0]]['id'] # Update the 'id' to the merged node's ID
+                end_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
 
                 # update the span geometry to match the merged node
@@ -730,7 +729,7 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     return gdf_ofds_spans, gdf_ofds_nodes
 
 
-def merge_nearby_auto_gen_and_propoer_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
+def merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
     print("\nMerging auto-generated nodes that are in close proximity to a named node...")
     
@@ -870,67 +869,74 @@ def convert_to_serializable(obj):
         return obj
 
 
-def main():
+@click.command(help="Convert KML files to the Open Fibre Data Standard format.")
+@click.option('--kml-file', help='KML file to convert to OFDS.')
+@click.option('--input-dir', default='input/', help='Directory containing KML files.')
+@click.option('--output-dir', default='output/', help='Directory to save converted files.')
+@click.option('--network-profile', default='default.profile', help='Load variables from network profile.')
 
-    config_file = "kml2ofds.ini"
-    config_values = load_config(config_file)
+def main(kml_file, input_dir, output_dir, network_profile):
+   
+    #config_file = "kml2ofds.ini"
+    network_prof = load_config(network_profile)
 
     # set network name,id, and links
-    if not config_values["network_name"]:
+    if not network_prof["network_name"]:
         network_name = "Default Network Name"
         print("Network name not found in config file. Using default value.")
     else:
-        network_name = config_values["network_name"]
+        network_name = network_prof["network_name"]
 
-    if not config_values["network_id"]:
+    if not network_prof["network_id"]:
         network_id = str(uuid.uuid4())
     else:
-        network_id = config_values["network_id"]
+        network_id = network_prof["network_id"]
 
-    if not config_values["network_links"]:
+    if not network_prof["network_links"]:
         network_link_url = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
         print("Network links not found in config file. Using default value.")
     else:
-        network_link_url = config_values["network_links"]
+        network_link_url = network_prof["network_links"]
 
     network_links = [{"rel": "describedby", "href": network_link_url}]
 
-    if not config_values["ignore_placemarks"]:
+    if not network_prof["ignore_placemarks"]:
         ignore_placemarks = []
     else:
-        ignore_placemarks = config_values["ignore_placemarks"].split(";")
+        ignore_placemarks = network_prof["ignore_placemarks"].split(";")
 
     # output files
     today = datetime.today()
     date_string = today.strftime("%d%b%Y").lower()
-    if not config_values["input_directory"]:
+    if not network_prof["input_directory"]:
         input_directory = "input/"
     else:
-        input_directory = config_values["input_directory"]
-    if not config_values["output_directory"]:
+        input_directory = network_prof["input_directory"]
+    if not network_prof["output_directory"]:
         output_directory = "output/"
     else:
-        output_directory = config_values["output_directory"]
+        output_directory = network_prof["output_directory"]
 
     # network_file_name = network_name.replace(" ", "_").lower()
 
     # Prompt the user for a directory, defaulting to the "input" subdirectory if none is provided.
-    directory = input(
-        "Enter the directory path for kml files \n(leave blank to use the 'input' subdirectory): "
-    ).strip()
-    if not directory:
-        directory = os.path.join(os.getcwd(), input_directory)
+    # directory = input(
+    #     "Enter the directory path for kml files \n(leave blank to use the 'input' subdirectory): "
+    # ).strip()
+    # if not directory:
+    #     directory = os.path.join(os.getcwd(), input_directory)
 
-    kml_files = list_kml_files(directory)
+    # kml_files = list_kml_files(directory)
 
-    if not kml_files:
-        print("No .kml files found in the directory.")
-        exit()
+    # if not kml_files:
+    #     print("No .kml files found in the directory.")
+    #     exit()
 
-    kml_file = select_file(kml_files)
+    # kml_file = select_file(kml_files)
+    directory = os.path.join(os.getcwd(), input_directory)
     kml_fullpath = os.path.join(directory, kml_file)
 
-    network_name = prompt_for_network(network_name)
+    # network_name = prompt_for_network(network_name)
 
     # set file names
     network_filename_normalised = kml_file.replace(" ", "_").upper()
@@ -983,7 +989,7 @@ def main():
     gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-1)
 
     # Merge nearby auto-generated nodes that are in close proximity propoer nodes
-    gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_and_propoer_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-3)
+    gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-3)
 
     # Save the results to geojson files
     gdf_ofds_spans.to_file(spans_ofds_output, driver="GeoJSON")
@@ -1015,7 +1021,6 @@ def main():
     # print(worker.get_meta_json())
 
     print("Complete")
-
 
 # main
 if __name__ == "__main__":
