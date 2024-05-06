@@ -1,6 +1,6 @@
 [project]
 name = "kml2ofds"
-version = "0.0.1"
+version = "0.1.1"
 authors = [{ name = "Steve Song", email = "steve@manypossibilities.net" }]
 description = "KML2OFDS is a python script for converting KML maps of fibre optic network infrastructure to the Open Fibre Data Standard"
 readme = "README.md"
