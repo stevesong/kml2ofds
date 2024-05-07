@@ -12,3 +12,5 @@ dist/
 .venv/
 .gitignore
 nofbi.profile
+mtn_zambia.profile
+mtn_ghana_fob.profile
