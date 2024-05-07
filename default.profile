@@ -6,5 +6,5 @@ network_links = https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-
 ignore_placemarks = 
 
 [DIRECTORY]
-input_directory = input/
-output_directory = output/
+input_directory =
+output_directory =

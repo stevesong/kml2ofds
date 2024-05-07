@@ -28,7 +28,6 @@ from shapely.geometry import (
 from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
-import inquirer
 import re
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
@@ -62,6 +61,7 @@ def load_config(config_file):
         "ignore_placemarks": ignore_placemarks_array
     }
 
+
 def process_kml(filename, network_id, network_name, ignore_placemarks):
     with open(filename) as f:
         kml_doc = parser.parse(f).getroot()
@@ -79,7 +79,7 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
         nodes, spans = process_document(document, network_id, network_name, ignore_placemarks)
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
-    
+
     print(f"Number of nodes found before deduplication: {len(geojson_nodes)}")
     geojson_nodes = remove_duplicate_nodes(geojson_nodes, 2)
 
@@ -102,6 +102,7 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
     )
     return gdf_ofds_nodes, gdf_spans
 
+
 def remove_duplicate_nodes(geojson_nodes, precision):
     """
     Removes duplicate nodes from the list of GeoJSON nodes based on a specified precision.
@@ -121,6 +122,7 @@ def remove_duplicate_nodes(geojson_nodes, precision):
             # Add the hash to the set of seen hashes
             seen_hashes.add(node_hash)
     return unique_nodes
+
 
 def process_document(document, network_id, network_name, ignore_placemarks):
     """Process a KML Document and return a list of GeoJSON nodes and spans.
@@ -189,9 +191,7 @@ def process_document(document, network_id, network_name, ignore_placemarks):
 
                 # If name does not match an element in the ignore_placemarks
                 # array, add the GeoJSON object to the list
-
                 is_ignored = False
-
                 for ignore_pattern in ignore_placemarks:
                     if re.search(fr"{ignore_pattern}", name):
                         is_ignored = True
@@ -311,11 +311,11 @@ def process_document(document, network_id, network_name, ignore_placemarks):
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
 
+
 def snap_to_line(point, lines, tolerance=1e-4):
     """Find the nearest line to a given point and find the
     nearest point on that line to the given point.
     """
-
     nearest_line = None
     min_distance = float("inf")
     nearest_point_on_line = None
@@ -616,6 +616,7 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
     )
     return gdf_spans
 
+
 def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
     print("\nMerging auto-generated nodes that are in close proximity to each other...")
@@ -655,7 +656,7 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
                 gdf_ofds_spans.at[index, 'geometry'] = span_geometry
-                
+
             elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
                 end_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
@@ -668,19 +669,19 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
                 gdf_ofds_spans.at[index, 'geometry'] = span_geometry
-        
+
         # Convert the updated dictionaries back into JSON strings
         start_json = json.dumps(convert_to_serializable(start_dict))
         end_json = json.dumps(convert_to_serializable(end_dict))
-        
+
         # Update the 'start' and 'end' columns in the DataFrame for the current row
         gdf_ofds_spans.at[index, 'start'] = start_json
         gdf_ofds_spans.at[index, 'end'] = end_json
-    
+
     # Remove nodes that were merged
     # print(merged_node_ids)
     gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes['id'].isin(merged_node_ids)]
-    
+
     print(f"Number of nodes after merging nearby auto-added nodes: {len(gdf_ofds_nodes)}")
     return gdf_ofds_spans, gdf_ofds_nodes
 
@@ -688,12 +689,12 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
 def merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
     print("Merging auto-generated nodes that are in close proximity to a named node...")
-    
+
     # Extract coordinates as a 2D array
     coordinates = np.array([(point.x, point.y) for point in gdf_ofds_nodes.geometry])
     tree = KDTree(coordinates)
     clusters = [indices for indices in tree.query_radius(coordinates, r=threshold) if len(indices) > 1]
-    
+
     # Filter clusters where at least one node has the name 'Auto generated missing node'
     # making sure that the first cluster element is the node with the name 'Auto generated missing node'
     found_clusters = []
@@ -707,13 +708,13 @@ def merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, thres
                 # Swap the order of the group if necessary to make the auto-generated node first
                 cluster = [cluster[auto_generated_index]] + [i for i in cluster if i != auto_generated_index]
             found_clusters.append(cluster)
-            
+
     # Update the spans with the merged nodes
     merged_node_ids = []
     for index, span in gdf_ofds_spans.iterrows():
         start_dict = json.loads(span['start'])
         end_dict = json.loads(span['end'])
-        
+
         for cluster in found_clusters:
             if start_dict['id'] == gdf_ofds_nodes.iloc[cluster[0]]['id']:
                 start_dict['id'] = gdf_ofds_nodes.iloc[cluster[1]]['id']
@@ -727,7 +728,7 @@ def merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, thres
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
                 gdf_ofds_spans.at[index, 'geometry'] = span_geometry
-                
+
             elif end_dict['id'] == gdf_ofds_nodes.iloc[cluster[0]]['id']:
                 end_dict['id'] = gdf_ofds_nodes.iloc[cluster[1]]['id']
                 merged_node_ids.append(gdf_ofds_nodes.iloc[cluster[0]]['id'])
@@ -863,14 +864,29 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
     # output files
     today = datetime.today()
     date_string = today.strftime("%d%b%Y").lower()
-    if not network_prof["input_directory"]:
+    if not network_prof["input_directory"] and not input_dir:
         input_directory = "input/"
-    else:
+    elif network_prof["input_directory"]:
         input_directory = network_prof["input_directory"]
-    if not network_prof["output_directory"]:
-        output_directory = "output/"
+        intput_directory = network_prof["input_directory"]  if network_prof["input_directory"].endswith('/') else network_prof["input_directory"] + '/'
     else:
-        output_directory = network_prof["output_directory"]
+        input_directory = input_dir if input_dir.endswith('/') else input_dir + '/'
+
+
+    if not network_prof["output_directory"] and not output_dir:
+        output_directory = "output/"
+    elif network_prof["output_directory"]:
+        output_directory = network_prof["output_directory"]  if network_prof["output_directory"].endswith('/') else network_prof["output_directory"] + '/'
+    else:
+        output_directory = output_dir if output_dir.endswith('/') else output_dir + '/'
+
+    # Check if input_directory exists, if not, create it
+    if not os.path.exists(input_directory):
+        os.makedirs(input_directory)
+
+    # Check if output_directory exists, if not, create it
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
 
     directory = os.path.join(os.getcwd(), input_directory)
     kml_fullpath = os.path.join(directory, kml_file)
@@ -880,7 +896,7 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
 
     if not output_name_prefix:
         output_name_prefix = network_filename_normalised[:3]
-        
+
     nodes_ofds_output = (
         output_directory
         + output_name_prefix
@@ -888,6 +904,8 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
         + date_string
         + ".geojson"
     )
+    print(nodes_ofds_output)
+
     spans_ofds_output = (
         output_directory
         + output_name_prefix
