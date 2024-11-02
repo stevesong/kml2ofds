@@ -32,7 +32,7 @@ import re
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
-
+from pathlib import Path
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 # import matplotlib.pyplot as plt
@@ -252,7 +252,6 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                     # If not a duplicate, add the GeoJSON object to the list
                     if not is_span_duplicate:
                         geojson_spans.append(geojson_span)
-
             elif (
                 placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
             ):
@@ -527,11 +526,15 @@ def add_missing_nodes(
         # Add points if they don't exist
         if not start_exists:
             new_node = append_node(start_point, network_id, network_name, network_links)
-            if not any(new_node["geometry"] == node["geometry"] for node in new_nodes):
+            if all(
+                new_node["geometry"] != node["geometry"] for node in new_nodes
+            ):
                 new_nodes.append(new_node)
         if not end_exists:
             new_node = append_node(end_point, network_id, network_name, network_links)
-            if not any(new_node["geometry"] == node["geometry"] for node in new_nodes):
+            if all(
+                new_node["geometry"] != node["geometry"] for node in new_nodes
+            ):
                 new_nodes.append(new_node)
 
     # Convert the list of new nodes into a GeoDataFrame
@@ -647,7 +650,6 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
             if start_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
                 start_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
-
                 # update the span geometry to match the merged node
                 new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
                 span_geometry = span['geometry']
@@ -656,11 +658,9 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
                 gdf_ofds_spans.at[index, 'geometry'] = span_geometry
-
             elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
                 end_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
-
                 # update the span geometry to match the merged node
                 new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
                 span_geometry = span['geometry']
@@ -831,96 +831,40 @@ def convert_to_serializable(obj):
 @click.option('--output-dir', default='output/', help='Directory to save converted files.')
 @click.option('--network-profile', default='default.profile', help='Load variables from network profile.')
 
+
 def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
    
-    #config_file = "kml2ofds.ini"
     network_prof = load_config(network_profile)
 
+    # Default directories
+    default_input_dir = Path("./input")
+    default_output_dir = Path("./output")
+    
     # set network name,id, and links
-    if not network_prof["network_name"]:
-        network_name = "Default Network Name"
-        print("Network name not found in config file. Using default value.")
-    else:
-        network_name = network_prof["network_name"]
-
-    if not network_prof["network_id"]:
-        network_id = str(uuid.uuid4())
-    else:
-        network_id = network_prof["network_id"]
-
-    if not network_prof["network_links"]:
-        network_link_url = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
-        print("Network links not found in config file. Using default value.")
-    else:
-        network_link_url = network_prof["network_links"]
-
+    network_name = network_prof.get("network_name", "Default Network Name")
+    network_id = network_prof.get("network_id", str(uuid.uuid4()))
+    network_link_url = network_prof.get("network_links", "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json")
     network_links = [{"rel": "describedby", "href": network_link_url}]
-
-    if not network_prof["ignore_placemarks"]:
-        ignore_placemarks = []
-    else:
-        ignore_placemarks = network_prof["ignore_placemarks"].split(";")
+    ignore_placemarks = [p.strip() for p in network_prof.get("ignore_placemarks", "").split(";") if p.strip()]
 
     # output files
-    today = datetime.today()
+    today = datetime.now()
     date_string = today.strftime("%d%b%Y").lower()
-    if not network_prof["input_directory"] and not input_dir:
-        input_directory = "input/"
-    elif network_prof["input_directory"]:
-        input_directory = network_prof["input_directory"]
-        intput_directory = network_prof["input_directory"]  if network_prof["input_directory"].endswith('/') else network_prof["input_directory"] + '/'
-    else:
-        input_directory = input_dir if input_dir.endswith('/') else input_dir + '/'
 
+    input_directory = Path(network_prof.get("input_directory") or default_input_dir).resolve()
+    output_directory = Path(network_prof.get("output_directory") or default_output_dir).resolve()
 
-    if not network_prof["output_directory"] and not output_dir:
-        output_directory = "output/"
-    elif network_prof["output_directory"]:
-        output_directory = network_prof["output_directory"]  if network_prof["output_directory"].endswith('/') else network_prof["output_directory"] + '/'
-    else:
-        output_directory = output_dir if output_dir.endswith('/') else output_dir + '/'
+    input_directory.mkdir(parents=True, exist_ok=True)
+    output_directory.mkdir(parents=True, exist_ok=True)
 
-    # Check if input_directory exists, if not, create it
-    if not os.path.exists(input_directory):
-        os.makedirs(input_directory)
+    kml_fullpath = input_directory / kml_file
 
-    # Check if output_directory exists, if not, create it
-    if not os.path.exists(output_directory):
-        os.makedirs(output_directory)
-
-    directory = os.path.join(os.getcwd(), input_directory)
-    kml_fullpath = os.path.join(directory, kml_file)
-
-    # set file names
     network_filename_normalised = kml_file.replace(" ", "_").upper()
+    output_name_prefix = output_name_prefix or network_filename_normalised[:3]
 
-    if not output_name_prefix:
-        output_name_prefix = network_filename_normalised[:3]
-
-    nodes_ofds_output = (
-        output_directory
-        + output_name_prefix
-        + "_ofds-nodes_"
-        + date_string
-        + ".geojson"
-    )
-    print(nodes_ofds_output)
-
-    spans_ofds_output = (
-        output_directory
-        + output_name_prefix
-        + "_ofds-spans_"
-        + date_string
-        + ".geojson"
-    )
-
-    ofds_json_output = (
-        output_directory
-        + output_name_prefix
-        + "_ofds-json_"
-        + date_string
-        + ".json"
-    )
+    nodes_ofds_output = output_directory / f"{output_name_prefix}_ofds-nodes_{date_string}.geojson"
+    spans_ofds_output = output_directory / f"{output_name_prefix}_ofds-spans_{date_string}.geojson"
+    ofds_json_output = output_directory / f"{output_name_prefix}_ofds-json_{date_string}.json"
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
     gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name, ignore_placemarks)
