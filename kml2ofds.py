@@ -42,24 +42,12 @@ def load_config(config_file):
     config = configparser.ConfigParser()
     config.read(config_file)
 
-    # Accessing default values
-    network_name = config.get("DEFAULT", "network_name")
-    network_id = config.get("DEFAULT", "network_id")
-    network_links = config.get("DEFAULT", "network_links")
-    ignore_placemarks_array = config.get("DEFAULT", "ignore_placemarks")
-
-    # Accessing values under a specific section
-    input_directory = config.get("DIRECTORY", "input_directory")
-    output_directory = config.get("DIRECTORY", "output_directory")
-
-    return {
-        "network_name": network_name,
-        "network_id": network_id,
-        "network_links": network_links,
-        "input_directory": input_directory,
-        "output_directory": output_directory,
-        "ignore_placemarks": ignore_placemarks_array
+    keys = {
+        "DEFAULT": ["network_name", "network_id", "network_links", "ignore_placemarks"],
+        "DIRECTORY": ["input_directory", "output_directory"]
     }
+
+    return {k: config.get(section, k) for section, keys in keys.items() for k in keys}
 
 
 def process_kml(filename, network_id, network_name, ignore_placemarks):
