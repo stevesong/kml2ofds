@@ -127,7 +127,6 @@ def process_document(document, network_id, network_name, ignore_placemarks):
     schema_href = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
     KML_NS = "{http://www.opengis.net/kml/2.2}"
 
-
     # Process Folders within the Document
     for folder in document.iter(f"{KML_NS}Folder"):
         # print(f"Found folder: {folder.name.text}")
@@ -200,32 +199,17 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                     combined_coordinates.extend(coordinates_text.split())
 
                 geojson_span = process_line_string(" ".join(combined_coordinates), name, network_id, network_name, schema_href)
-                if geojson_span:
-                    # Check for duplicates before adding the GeoJSON object to the list
-                    is_span_duplicate = any(
-                        span["properties"]["name"] == name
-                        and span["geometry"]["coordinates"] == geojson_span["geometry"]["coordinates"]
-                        for span in geojson_spans
-                    )
-                    # If not a duplicate, add the GeoJSON object to the list
-                    if not is_span_duplicate:
-                        geojson_spans.append(geojson_span)
+                if geojson_span and not is_duplicate_span(geojson_span, geojson_spans):
+                    geojson_spans.append(geojson_span)
+
             elif placemark.find(f"{KML_NS}LineString") is not None:
                 # Look for LineStrings
                 polyline = placemark.find(f"{KML_NS}LineString")
                 if polyline is not None:
                     coordinates_text = polyline.find(f"{KML_NS}coordinates").text
                     geojson_span = process_line_string(coordinates_text, name, network_id, network_name, schema_href)
-                    if geojson_span:
-                        # Check for duplicates before adding the GeoJSON object to the list
-                        is_span_duplicate = any(
-                            span["properties"]["name"] == name
-                            and span["geometry"]["coordinates"] == geojson_span["geometry"]["coordinates"]
-                            for span in geojson_spans
-                        )
-                        # If not a duplicate, add the GeoJSON object to the list
-                        if not is_span_duplicate:
-                            geojson_spans.append(geojson_span)
+                    if geojson_span and not is_duplicate_span(geojson_span, geojson_spans):
+                        geojson_spans.append(geojson_span)
 
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
@@ -265,6 +249,12 @@ def process_line_string(coordinates_text, name, network_id, network_name, schema
         return geojson_span
     return None
 
+def is_duplicate_span(geojson_span, existing_spans):
+    return any(
+        span["properties"]["name"] == geojson_span["properties"]["name"]
+        and span["geometry"]["coordinates"] == geojson_span["geometry"]["coordinates"]
+        for span in existing_spans
+    )
 
 
 def snap_to_line(point, lines, tolerance=1e-4):
