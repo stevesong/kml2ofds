@@ -124,31 +124,34 @@ def process_document(document, network_id, network_name, ignore_placemarks):
     """
     geojson_nodes = []
     geojson_spans = []
+    schema_href = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
+    KML_NS = "{http://www.opengis.net/kml/2.2}"
+
 
     # Process Folders within the Document
-    for folder in document.iter("{http://www.opengis.net/kml/2.2}Folder"):
+    for folder in document.iter(f"{KML_NS}Folder"):
         # print(f"Found folder: {folder.name.text}")
 
         # Process Placemarks within this Folder
-        for placemark in folder.iter("{http://www.opengis.net/kml/2.2}Placemark"):
+        for placemark in folder.iter(f"{KML_NS}Placemark"):
 
             # name = placemark.find('{http://www.opengis.net/kml/2.2}name').text
-            name_element = placemark.find("{http://www.opengis.net/kml/2.2}name")
+            name_element = placemark.find(f"{KML_NS}name")
             name = name_element.text if name_element is not None else "Default Name"
 
             # Check if placemark is a point
-            point_geometry = placemark.find("{http://www.opengis.net/kml/2.2}Point")
+            point_geometry = placemark.find(f"{KML_NS}Point")
             if point_geometry is not None:
                 # Convert KML Point to Shapely Point
                 shapely_point = Point(
                     float(
                         point_geometry.find(
-                            "{http://www.opengis.net/kml/2.2}coordinates"
+                            f"{KML_NS}coordinates"
                         ).text.split(",")[0]
                     ),
                     float(
                         point_geometry.find(
-                            "{http://www.opengis.net/kml/2.2}coordinates"
+                            f"{KML_NS}coordinates"
                         ).text.split(",")[1]
                     ),
                 )
@@ -165,7 +168,7 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                             "links": [
                                 {
                                     "rel": "describedby",
-                                    "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                    "href": schema_href,
                                 }
                             ],
                         },
@@ -189,106 +192,35 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                     geojson_nodes.append(geojson_node)
 
             # Look for MultiGeometry elements
-            multi_geometry = placemark.find(
-                "{http://www.opengis.net/kml/2.2}MultiGeometry"
-            )
+            multi_geometry = placemark.find(f"{KML_NS}MultiGeometry")
             if multi_geometry is not None:
                 combined_coordinates = []
-                for line_string in multi_geometry.iter(
-                    "{http://www.opengis.net/kml/2.2}LineString"
-                ):
-                    coordinates_text = line_string.find(
-                        "{http://www.opengis.net/kml/2.2}coordinates"
-                    ).text
-                    coordinates = [
-                        tuple(map(float, coord.split(",")))
-                        for coord in coordinates_text.split()
-                    ]
-                    combined_coordinates.extend(coordinates)
-                shapely_line = LineString(combined_coordinates)
-                if shapely_line is not None:
-                    # Convert Shapely LineString to GeoJSON
-                    geojson_span = {
-                        "type": "Feature",
-                        "properties": {
-                            "id": "",
-                            "name": name,
-                            "network": {
-                                "id": network_id,
-                                "name": network_name,
-                                "links": [
-                                    {
-                                        "rel": "describedby",
-                                        "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
-                                    }
-                                ],
-                            },
-                            "featureType": "span",
-                        },
-                        "geometry": {
-                            "type": "LineString",
-                            "coordinates": [(x, y) for x, y, *_ in shapely_line.coords],
-                        },
-                    }
+                for line_string in multi_geometry.iter(f"{KML_NS}LineString"):
+                    coordinates_text = line_string.find(f"{KML_NS}coordinates").text
+                    combined_coordinates.extend(coordinates_text.split())
+
+                geojson_span = process_line_string(" ".join(combined_coordinates), name, network_id, network_name, schema_href)
+                if geojson_span:
                     # Check for duplicates before adding the GeoJSON object to the list
                     is_span_duplicate = any(
                         span["properties"]["name"] == name
-                        and span["geometry"]["coordinates"]
-                        == geojson_span["geometry"]["coordinates"]
+                        and span["geometry"]["coordinates"] == geojson_span["geometry"]["coordinates"]
                         for span in geojson_spans
                     )
                     # If not a duplicate, add the GeoJSON object to the list
                     if not is_span_duplicate:
                         geojson_spans.append(geojson_span)
-            elif (
-                placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
-            ):
+            elif placemark.find(f"{KML_NS}LineString") is not None:
                 # Look for LineStrings
-                polyline = placemark.find("{http://www.opengis.net/kml/2.2}LineString")
+                polyline = placemark.find(f"{KML_NS}LineString")
                 if polyline is not None:
-                    coordinates_text = polyline.find(
-                        "{http://www.opengis.net/kml/2.2}coordinates"
-                    ).text
-                    coordinates = [
-                        tuple(map(float, coord.split(",")))
-                        for coord in coordinates_text.split()
-                    ]
-                    # Convert to Shapely LineString
-                    # ignore linestrings with only one point
-                    if len(coordinates) > 1:
-                        shapely_line = LineString(coordinates)
-
-                    if shapely_line is not None:
-                        # Convert Shapely LineString to GeoJSON
-                        geojson_span = {
-                            "type": "Feature",
-                            "properties": {
-                                "id": "",
-                                "name": name,
-                                "network": {
-                                    "id": network_id,
-                                    "name": network_name,
-                                    "links": [
-                                        {
-                                            "rel": "describedby",
-                                            "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
-                                        }
-                                    ],
-                                },
-                                "featureType": "span",
-                            },
-                            "geometry": {
-                                "type": "LineString",
-                                "coordinates": [
-                                    (x, y) for x, y, *_ in shapely_line.coords
-                                ],
-                            },
-                        }
+                    coordinates_text = polyline.find(f"{KML_NS}coordinates").text
+                    geojson_span = process_line_string(coordinates_text, name, network_id, network_name, schema_href)
+                    if geojson_span:
                         # Check for duplicates before adding the GeoJSON object to the list
                         is_span_duplicate = any(
                             span["properties"]["name"] == name
-                            and span["geometry"]["coordinates"]
-                            == geojson_span["geometry"]["coordinates"]
+                            and span["geometry"]["coordinates"] == geojson_span["geometry"]["coordinates"]
                             for span in geojson_spans
                         )
                         # If not a duplicate, add the GeoJSON object to the list
@@ -297,6 +229,42 @@ def process_document(document, network_id, network_name, ignore_placemarks):
 
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
+
+
+def process_line_string(coordinates_text, name, network_id, network_name, schema_href):
+    coordinates = [
+        tuple(map(float, coord.split(",")))
+        for coord in coordinates_text.split()
+    ]
+    if len(coordinates) > 1:
+        shapely_line = LineString(coordinates)
+        geojson_span = {
+            "type": "Feature",
+            "properties": {
+                "id": "",
+                "name": name,
+                "network": {
+                    "id": network_id,
+                    "name": network_name,
+                    "links": [
+                        {
+                            "rel": "describedby",
+                            "href": schema_href,
+                        }
+                    ],
+                },
+                "featureType": "span",
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    (x, y) for x, y, *_ in shapely_line.coords
+                ],
+            },
+        }
+        return geojson_span
+    return None
+
 
 
 def snap_to_line(point, lines, tolerance=1e-4):
