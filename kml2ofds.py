@@ -7,15 +7,16 @@ License: GPL 3.0
 Date: 24-Mar-2024
 Usage: python kml2ofds.py
 """
-
-import click
+import re
 import configparser
-from datetime import datetime
-import os
 import json
 import uuid
+import os
 from collections import Counter
 from pykml import parser
+from pathlib import Path
+import click
+from datetime import datetime
 import numpy as np
 from sklearn.neighbors import KDTree
 from shapely.geometry import (
@@ -28,23 +29,35 @@ from shapely.geometry import (
 from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
-import re
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
-from pathlib import Path
+
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 # import matplotlib.pyplot as plt
 
+KML_NS = "{http://www.opengis.net/kml/2.2}"
+
 
 def load_config(config_file):
+    """
+    Load configuration values from a config file.
+
+    Args:
+        config_file (str): The path to the config file.
+
+    Returns:
+        dict: A dictionary containing the loaded configuration values.
+
+    """
+
     config = configparser.ConfigParser()
     config.read(config_file)
 
     keys = {
         "DEFAULT": ["network_name", "network_id", "network_links", "ignore_placemarks"],
-        "DIRECTORY": ["input_directory", "output_directory"]
+        "DIRECTORY": ["input_directory", "output_directory"],
     }
 
     return {k: config.get(section, k) for section, keys in keys.items() for k in keys}
@@ -125,7 +138,6 @@ def process_document(document, network_id, network_name, ignore_placemarks):
     geojson_nodes = []
     geojson_spans = []
     schema_href = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
-    KML_NS = "{http://www.opengis.net/kml/2.2}"
 
     # Process Folders within the Document
     for folder in document.iter(f"{KML_NS}Folder"):
@@ -133,71 +145,22 @@ def process_document(document, network_id, network_name, ignore_placemarks):
 
         # Process Placemarks within this Folder
         for placemark in folder.iter(f"{KML_NS}Placemark"):
-
-            # name = placemark.find('{http://www.opengis.net/kml/2.2}name').text
             name_element = placemark.find(f"{KML_NS}name")
             name = name_element.text if name_element is not None else "Default Name"
 
             # Check if placemark is a point
             point_geometry = placemark.find(f"{KML_NS}Point")
             if point_geometry is not None:
-                # Convert KML Point to Shapely Point
-                shapely_point = Point(
-                    float(
-                        point_geometry.find(
-                            f"{KML_NS}coordinates"
-                        ).text.split(",")[0]
-                    ),
-                    float(
-                        point_geometry.find(
-                            f"{KML_NS}coordinates"
-                        ).text.split(",")[1]
-                    ),
-                )
-                # Convert Shapely Point to GeoJSON
-                node_id = str(uuid.uuid4())
-                geojson_node = {
-                    "type": "Feature",
-                    "properties": {
-                        "name": name,
-                        "id": node_id,
-                        "network": {
-                            "id": network_id,
-                            "name": network_name,
-                            "links": [
-                                {
-                                    "rel": "describedby",
-                                    "href": schema_href,
-                                }
-                            ],
-                        },
-                        "featureType": "node",
-                    },
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [shapely_point.x, shapely_point.y],
-                    },
-                }
+                process_point(point_geometry, name, network_id, network_name, schema_href, ignore_placemarks, geojson_nodes)
+                continue
 
-                # If name does not match an element in the ignore_placemarks
-                # array, add the GeoJSON object to the list
-                is_ignored = False
-                for ignore_pattern in ignore_placemarks:
-                    if re.search(fr"{ignore_pattern}", name):
-                        is_ignored = True
-                        break
-
-                if not is_ignored:
-                    geojson_nodes.append(geojson_node)
-
-            # Look for MultiGeometry elements
+            # Process MultiGeometry elements
             multi_geometry = placemark.find(f"{KML_NS}MultiGeometry")
             if multi_geometry is not None:
                 combined_coordinates = []
                 for line_string in multi_geometry.iter(f"{KML_NS}LineString"):
                     coordinates_text = line_string.find(f"{KML_NS}coordinates").text
                     combined_coordinates.extend(coordinates_text.split())
-
                 geojson_span = process_line_string(" ".join(combined_coordinates), name, network_id, network_name, schema_href)
                 if geojson_span and not is_duplicate_span(geojson_span, geojson_spans):
                     geojson_spans.append(geojson_span)
@@ -213,6 +176,33 @@ def process_document(document, network_id, network_name, ignore_placemarks):
 
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
+
+def process_point(point_geometry, name, network_id, network_name, schema_href, ignore_placemarks, geojson_nodes):
+    shapely_point = Point(
+        float(point_geometry.find(f"{KML_NS}coordinates").text.split(",")[0]),
+        float(point_geometry.find(f"{KML_NS}coordinates").text.split(",")[1])
+    )
+    node_id = str(uuid.uuid4())
+    geojson_node = {
+        "type": "Feature",
+        "properties": {
+            "name": name,
+            "id": node_id,
+            "network": {
+                "id": network_id,
+                "name": network_name,
+                "links": [{"rel": "describedby", "href": schema_href}],
+            },
+            "featureType": "node",
+        },
+        "geometry": {
+            "type": "Point",
+            "coordinates": [shapely_point.x, shapely_point.y],
+        },
+    }
+
+    if not any(re.search(fr"{ignore_pattern}", name) for ignore_pattern in ignore_placemarks):
+        geojson_nodes.append(geojson_node)
 
 
 def process_line_string(coordinates_text, name, network_id, network_name, schema_href):
@@ -248,6 +238,7 @@ def process_line_string(coordinates_text, name, network_id, network_name, schema
         }
         return geojson_span
     return None
+
 
 def is_duplicate_span(geojson_span, existing_spans):
     return any(
@@ -292,8 +283,12 @@ def snap_to_line(point, lines, tolerance=1e-4):
 
 
 def break_spans_at_node_points(
-    gdf_nodes, gdf_spans, network_name, network_id, network_links
-):
+    gdf_nodes: gpd.GeoDataFrame,
+    gdf_spans: gpd.GeoDataFrame,
+    network_name: str,
+    network_id: str,
+    network_links: str
+) -> gpd.GeoDataFrame:
     """
     Breaks the spans into segments at each node intersection.
 
@@ -307,55 +302,40 @@ def break_spans_at_node_points(
     Returns:
         GeoDataFrame: GeoDataFrame containing the split linestrings.
     """
+
+    # Create buffered points for all nodes at once
+    gdf_buffered_nodes = gdf_nodes.copy()
+    gdf_buffered_nodes['geometry'] = gdf_buffered_nodes.geometry.buffer(1e-9)
+
     split_lines = []
     self_intersects = []
     self_intersect = []
     feature_type = "span"
 
-    # Iterate over the spans and find the nodes that intersect each span
-    # breaking the spans into segments at each node intersection
-    for _, line_row in gdf_spans.iterrows():
-        span_name = line_row["name"]
-        buffered_points = []
-        intersected_buffered_points = []
-        point_names = []
-        intersected_points = []
+    # Perform spatial join to find intersections
+    intersections = gpd.sjoin(gdf_buffered_nodes, gdf_spans, how="inner", predicate="intersects")
 
-        # Create a buffer around each node point
-        for _, point_row in gdf_nodes.iterrows():
-            point = point_row.geometry
-            point_name = point_row["name"]
-            buffered_point = point.buffer(1e-9)
-            buffered_points.append(buffered_point)
+    for span_index, span_row in gdf_spans.iterrows():
+        span_name = span_row["name"]
+        
+        # Get intersecting nodes for this span
+        intersecting_nodes = intersections[intersections.index_right == span_index]
+        
+        if not intersecting_nodes.empty:
+            buffered_area = MultiPolygon(intersecting_nodes.geometry.tolist())
+            point_names = intersecting_nodes['name_left'].tolist()
 
-            # Check if the line intersects the buffered point and add the point name to the point_names list
-            if line_row.geometry.intersects(buffered_point):
-                intersected_buffered_points.append(buffered_point)
-                intersected_points.append(point)
-                point_names.append(
-                    point_name
-                )  # Capture the name of the intersecting point
-
-        # buffered_area = MultiPolygon(intersected_buffered_points)
-        buffered_area = MultiPolygon(intersected_buffered_points)
-
-        if line_row.geometry.intersects(buffered_area):
-            # Snap each point in splitter to the nearest point on the LineString
-            # snapped_points = [snap(point, line_row.geometry, 1.0e-5) for point in intersected_points]
-            # buffered_area = MultiPoint(snapped_points)
-
-            # Check for self-intersecting spans
-            if line_row.geometry.is_simple:
-                split_line = split(line_row.geometry, buffered_area)
+            # Handle self-intersecting spans
+            if span_row.geometry.is_simple:
+                split_line = split(span_row.geometry, buffered_area)
             else:
-                self_intersect = find_self_intersection(line_row.geometry)
+                self_intersect = find_self_intersection(span_row.geometry)
                 self_intersects.append(self_intersect)
-                split_line = split(line_row.geometry, buffered_area)
+                split_line = split(span_row.geometry, buffered_area)
                 split_line = rejoin_self_intersection_breaks(split_line, self_intersect)
 
             for segment in split_line.geoms:
                 segment_uuid = str(uuid.uuid4())
-                # Include both polyline and point names with the geometry
                 split_lines.append(
                     (
                         segment_uuid,
@@ -366,28 +346,29 @@ def break_spans_at_node_points(
                     )
                 )
         else:
-            # Generate a UUID for the original line if no intersection
+            # No intersections, keep original span
             segment_uuid = str(uuid.uuid4())
             split_lines.append(
-                (segment_uuid, line_row.geometry, span_name, feature_type, "")
+                (segment_uuid, span_row.geometry, span_name, feature_type, "")
             )
 
     # Create a new GeoDataFrame from the split linestrings
-    gdf_spans = gpd.GeoDataFrame(
+    gdf_split_spans = gpd.GeoDataFrame(
         split_lines, columns=["id", "geometry", "name", "featureType", "pointNames"]
     )
 
     # Add network metadata to the split spans GeoDataFrame
-    gdf_spans = gdf_spans.apply(
+    gdf_split_spans = gdf_split_spans.apply(
         lambda row: update_network_field(row, network_name, network_id, network_links),
         axis=1,
     )
 
-    gdf_intersects = gpd.GeoDataFrame(geometry=self_intersects, crs=gdf_spans.crs)
-    if not gdf_intersects.empty:
+    # Handle self-intersects if any
+    if self_intersects:
+        gdf_intersects = gpd.GeoDataFrame(geometry=self_intersects, crs=gdf_split_spans.crs)
         gdf_intersects.to_file("output/intersects.geojson", driver="GeoJSON")
 
-    return gdf_spans
+    return gdf_split_spans
 
 
 def find_self_intersection(line):
