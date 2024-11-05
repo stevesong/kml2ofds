@@ -11,12 +11,12 @@ import re
 import configparser
 import json
 import uuid
-import os
+# import os
 from collections import Counter
-from pykml import parser
 from pathlib import Path
-import click
 from datetime import datetime
+from pykml import parser
+import click
 import numpy as np
 from sklearn.neighbors import KDTree
 from shapely.geometry import (
@@ -29,9 +29,10 @@ from shapely.geometry import (
 from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
+# from tqdm import tqdm
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
-from libcoveofds.schema import OFDSSchema
-from libcoveofds.jsonschemavalidate import JSONSchemaValidator
+# from libcoveofds.schema import OFDSSchema
+# from libcoveofds.jsonschemavalidate import JSONSchemaValidator
 
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
@@ -178,6 +179,21 @@ def process_document(document, network_id, network_name, ignore_placemarks):
     return geojson_nodes, geojson_spans
 
 def process_point(point_geometry, name, network_id, network_name, schema_href, ignore_placemarks, geojson_nodes):
+    """
+    Process a point geometry and add it to the GeoJSON nodes.
+
+    Args:
+        point_geometry: The point geometry to process.
+        name (str): The name of the point.
+        network_id (str): The ID of the network.
+        network_name (str): The name of the network.
+        schema_href (str): The href of the schema.
+        ignore_placemarks (list): A list of patterns to ignore placemarks.
+        geojson_nodes (list): The list of GeoJSON nodes.
+
+    Returns:
+        None
+    """
     shapely_point = Point(
         float(point_geometry.find(f"{KML_NS}coordinates").text.split(",")[0]),
         float(point_geometry.find(f"{KML_NS}coordinates").text.split(",")[1])
@@ -372,6 +388,15 @@ def break_spans_at_node_points(
 
 
 def find_self_intersection(line):
+    """
+    Find self-intersections in a LineString.
+
+    Args:
+        line (LineString): The LineString to check for self-intersections.
+
+    Returns:
+        MultiPoint or None: A MultiPoint object representing the self-intersections, or None if no self-intersections are found.
+    """
     intersection = None
     if not line.is_simple:
         intersection = unary_union(line)
@@ -384,57 +409,62 @@ def find_self_intersection(line):
 
 
 def rejoin_self_intersection_breaks(split_lines, intersect_points):
+    """
+    Rejoin self-intersection breaks in a set of split lines.
 
+    Args:
+        split_lines (GeometryCollection): The split lines to rejoin.
+        intersect_points (MultiPoint): The points representing the self-intersections.
+
+    Returns:
+        GeometryCollection: A GeometryCollection containing the rejoined lines.
+
+    Examples:
+        >>> split_lines = ...
+        >>> intersect_points = ...
+        >>> rejoin_lines = rejoin_self_intersection_breaks(split_lines, intersect_points)
+    """
     joined_lines = []
     i = 0
-
+    
     while i < len(split_lines.geoms):
         current_line = split_lines.geoms[i]
-
-        # Access the next line
-        if i + 1 < len(split_lines.geoms):
+        joined_line = current_line
+        
+        while i + 1 < len(split_lines.geoms):
             next_line = split_lines.geoms[i + 1]
-            point_to_check = Point(next_line.coords[0])
-
-            # Check if the last point of line1 is equal to the first point of line2
-            if current_line.coords[-1] == next_line.coords[
-                0
-            ] and intersect_points.contains(point_to_check):
-
-                joined_line = LineString(
-                    list(current_line.coords)[:-1] + list(next_line.coords)[1:]
-                )
-                i += 1  # Increment i by 1 to skip the next line
-                current_line = split_lines.geoms[i]
-                if i + 1 < len(split_lines.geoms):
-                    next_line = split_lines.geoms[i + 1]
-                while (
-                    current_line.coords[-1] == next_line.coords[0]
-                    and intersect_points.contains(Point(next_line.coords[0]))
-                    and i + 2 < len(split_lines.geoms)
-                ):
-                    joined_line = LineString(
-                        list(joined_line.coords)[:-1] + list(next_line.coords)[1:]
-                    )
-                    i += 1
-                    current_line = split_lines.geoms[i]
-                    next_line = split_lines.geoms[i + 1]
-
-                joined_lines.append(joined_line)
+            next_start_point = Point(next_line.coords[0])
+            
+            if (joined_line.coords[-1] == next_line.coords[0] and 
+                intersect_points.contains(next_start_point)):
+                joined_line = LineString(list(joined_line.coords)[:-1] + list(next_line.coords)[1:])
+                i += 1
             else:
-                joined_lines.append(current_line)
-        else:
-            joined_lines.append(current_line)
+                break
+        
+        joined_lines.append(joined_line)
+        i += 1
 
-        i += 1  # Increment i by 1 for the next iteration
-
-    geometry_collection = GeometryCollection(joined_lines)
-    return geometry_collection
+    return GeometryCollection(joined_lines)
 
 
 def add_missing_nodes(
     gdf_spans, gdf_nodes, network_id, network_name, network_links, tolerance=1e-6
 ):
+    """
+    Add missing nodes to spans in order to ensure that each segment has a start and end node.
+
+    Args:
+        gdf_spans (GeoDataFrame): The GeoDataFrame containing the spans.
+        gdf_nodes (GeoDataFrame): The GeoDataFrame containing the existing nodes.
+        network_id (str): The ID of the network.
+        network_name (str): The name of the network.
+        network_links (list): The list of network links.
+        tolerance (float, optional): The tolerance value for buffer operations. Defaults to 1e-6.
+
+    Returns:
+        tuple: A tuple containing two GeoDataFrames. The first GeoDataFrame is the combined nodes with the added missing nodes, and the second GeoDataFrame is the newly added nodes.
+    """
     # Ensure that each segment has a start and end node
     # If not, add the missing nodes to the ofds_points_gdf
     new_nodes = []  # Store new nodes to be appended to the ofds_points_gdf
@@ -484,6 +514,18 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
     end_points = []
     counter = 0
 
+    def create_point_info(point):
+        if point is None:
+            return None
+        return {
+            "id": point["id"],
+            "name": point["name"],
+            "location": {
+                "type": "Point",
+                "coordinates": [point.geometry.x, point.geometry.y],
+            },
+        }
+
     for _, span in gdf_spans.iterrows():
         start_point_geom = span.geometry.coords[0]
         end_point_geom = span.geometry.coords[-1]
@@ -493,38 +535,18 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
         matching_end_point = find_end_point(end_point_geom, gdf_nodes)
 
         if matching_start_point is not None:
-            start_points_info = {
-                "id": matching_start_point["id"],
-                "name": matching_start_point["name"],
-                "location": {
-                    "type": "Point",
-                    "coordinates": [
-                        matching_start_point.geometry.x,
-                        matching_start_point.geometry.y,
-                    ],
-                },
-            }
+            start_point_info = create_point_info(matching_start_point)
         else:
-            start_points_info = None
+            start_point_info = None
 
         if matching_end_point is not None:
-            end_points_info = {
-                "id": matching_end_point["id"],
-                "name": matching_end_point["name"],
-                "location": {
-                    "type": "Point",
-                    "coordinates": [
-                        matching_end_point.geometry.x,
-                        matching_end_point.geometry.y,
-                    ],
-                },
-            }
+            end_point_info = create_point_info(matching_end_point)
         else:
-            end_points_info = None
+            end_point_info = None
 
         # Append the matching points information to the lists
-        start_points.append(start_points_info)
-        end_points.append(end_points_info)
+        start_points.append(start_point_info)
+        end_points.append(end_point_info)
         # Increment the counter and display the progress
         counter += 1
         print(
@@ -766,10 +788,10 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
     # Default directories
     default_input_dir = Path("./input")
     default_output_dir = Path("./output")
-    
+
     # set network name,id, and links
     network_name = network_prof.get("network_name", "Default Network Name")
-    network_id = network_prof.get("network_id", str(uuid.uuid4()))
+    network_id = network_prof.get("network_id" or str(uuid.uuid4())) or str(uuid.uuid4())
     network_link_url = network_prof.get("network_links", "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json")
     network_links = [{"rel": "describedby", "href": network_link_url}]
     ignore_placemarks = [p.strip() for p in network_prof.get("ignore_placemarks", "").split(";") if p.strip()]
