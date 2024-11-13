@@ -12,8 +12,10 @@ import re
 import configparser
 from datetime import datetime
 import os
+import sys
 import json
 import uuid
+import pprint
 from collections import Counter
 from pykml import parser
 import numpy as np
@@ -29,7 +31,6 @@ from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
 import click
-import pprint
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
@@ -58,7 +59,6 @@ def load_config(config_file):
         for option in options:
             # Get the value of the option
             value = config.get(section, option)
-            
             # Assign the value to a variable with the same name
             parsed_config[option] = value
 
@@ -881,16 +881,19 @@ def convert_to_serializable(obj):
 
 
 @click.command(help="Convert KML files to the Open Fibre Data Standard format.")
-@click.option('--kml-file', help='KML file to convert to OFDS.', required=True)
-@click.option('--output-name-prefix', help='Prefix name for output files.')
-@click.option('--input-dir', default='input/', help='Directory containing KML files.')
-@click.option('--output-dir', default='output/', help='Directory to save converted files.')
-@click.option('--network-profile', default='default.profile', help='Load variables from network profile.')
+@click.option('--network-profile', help='Load variables from network profile.')
 
-def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
+def main(network_profile):
    
     #config_file = "kml2ofds.ini"
     network_prof = load_config(network_profile)
+
+    if not network_prof["kml_file_name"]:
+        print("Error. Please set kml file name in network profile")
+        sys:exit(1)
+    else:
+        kml_file = network_prof["kml_file_name"]
+
 
     # set network name,id, and links
     if not network_prof["network_name"]:
@@ -924,7 +927,7 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
         input_directory = "input/"
     elif network_prof["input_directory"]:
         input_directory = network_prof["input_directory"]
-        intput_directory = network_prof["input_directory"]  if network_prof["input_directory"].endswith('/') else network_prof["input_directory"] + '/'
+        # intput_directory = network_prof["input_directory"]  if network_prof["input_directory"].endswith('/') else network_prof["input_directory"] + '/'
     else:
         input_directory = input_dir if input_dir.endswith('/') else input_dir + '/'
 
@@ -950,8 +953,11 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
     # set file names
     network_filename_normalised = kml_file.replace(" ", "_").upper()
 
-    if not output_name_prefix:
-        output_name_prefix = network_filename_normalised[:3]
+    if not network_prof["output_name_prefix"]:
+        output_name_prefix = network_filename_normalised[3:]
+    else:
+        output_name_prefix = network_prof["output_name_prefix"]
+        
 
     nodes_ofds_output = (
         output_directory
