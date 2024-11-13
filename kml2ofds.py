@@ -29,6 +29,7 @@ from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
 import click
+import pprint
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
@@ -1047,7 +1048,7 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
     else:
         print("Validation failed")
         for error in result:
-            print(error)
+            pprint.pprint(error)
 
     print("Complete")
 
