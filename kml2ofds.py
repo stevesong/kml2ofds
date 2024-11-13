@@ -4,19 +4,18 @@ It outputs two geojson files, one for network spans and one for nodes.
 Author: Steve Song
 Email:  steve@manypossibilities.net
 License: GPL 3.0
-Date: 24-Mar-2024
+Date: 13-Nov-2024
 Usage: python kml2ofds.py
 """
+
 import re
 import configparser
+from datetime import datetime
+import os
 import json
 import uuid
-# import os
 from collections import Counter
-from pathlib import Path
-from datetime import datetime
 from pykml import parser
-import click
 import numpy as np
 from sklearn.neighbors import KDTree
 from shapely.geometry import (
@@ -29,39 +28,41 @@ from shapely.geometry import (
 from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
-# from tqdm import tqdm
+import click
 from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
-# from libcoveofds.schema import OFDSSchema
-# from libcoveofds.jsonschemavalidate import JSONSchemaValidator
-
+from libcoveofds.schema import OFDSSchema
+from libcoveofds.jsonschemavalidate import JSONSchemaValidator
+from libcoveofds.python_validate import PythonValidate
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 # import matplotlib.pyplot as plt
 
-KML_NS = "{http://www.opengis.net/kml/2.2}"
-
 
 def load_config(config_file):
-    """
-    Load configuration values from a config file.
-
-    Args:
-        config_file (str): The path to the config file.
-
-    Returns:
-        dict: A dictionary containing the loaded configuration values.
-
-    """
-
     config = configparser.ConfigParser()
     config.read(config_file)
 
-    keys = {
-        "DEFAULT": ["network_name", "network_id", "network_links", "ignore_placemarks"],
-        "DIRECTORY": ["input_directory", "output_directory"],
-    }
+    # Get all sections from the config file
+    sections = config.sections()
 
-    return {k: config.get(section, k) for section, keys in keys.items() for k in keys}
+    # Initialize an empty dictionary to store the parsed variables
+    parsed_config = {}
+
+    # Iterate over each section
+    for section in sections:
+        # Get all options (variables) within the section
+        options = config.options(section)
+        
+        # Iterate over each option
+        for option in options:
+            # Get the value of the option
+            value = config.get(section, option)
+            
+            # Assign the value to a variable with the same name
+            parsed_config[option] = value
+
+    return parsed_config
+
 
 
 def process_kml(filename, network_id, network_name, ignore_placemarks):
@@ -72,21 +73,24 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
     # Start processing from the root Document
     # First look for multiple Documents within the KML file.
     for document in kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"):
-        # print(
-        #     f"Found document: {document.name.text}",
-        #     end="",
-        #     flush=True,
-        # )
 
         nodes, spans = process_document(document, network_id, network_name, ignore_placemarks)
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
 
     print(f"Number of nodes found before deduplication: {len(geojson_nodes)}")
-    geojson_nodes = remove_duplicate_nodes(geojson_nodes, 2)
+    geojson_nodes = remove_duplicate_nodes(geojson_nodes, 1)
+    print(f"Number of nodes found after deduplication: {len(geojson_nodes)}")
 
     gdf_nodes = gpd.GeoDataFrame.from_features(geojson_nodes)
     gdf_spans = gpd.GeoDataFrame.from_features(geojson_spans)
+    
+    # Test for polylines with only 2 vertices
+    # two_vertex_spans = gdf_spans[gdf_spans.geometry.apply(lambda x: len(x.coords) < 5)]
+    # if not two_vertex_spans.empty:
+    #     print(f"Warning: Found {len(two_vertex_spans)} spans with only 2 vertices.")
+    #     print("These spans are:")
+    #     print(two_vertex_spans)
 
     # Save initial GeoJSON objects to files as a temporary measure
     with open("output/nodes.geojson", "w") as f:
@@ -138,130 +142,180 @@ def process_document(document, network_id, network_name, ignore_placemarks):
     """
     geojson_nodes = []
     geojson_spans = []
-    schema_href = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
 
     # Process Folders within the Document
-    for folder in document.iter(f"{KML_NS}Folder"):
+    for folder in document.iter("{http://www.opengis.net/kml/2.2}Folder"):
         # print(f"Found folder: {folder.name.text}")
 
         # Process Placemarks within this Folder
-        for placemark in folder.iter(f"{KML_NS}Placemark"):
-            name_element = placemark.find(f"{KML_NS}name")
+        for placemark in folder.iter("{http://www.opengis.net/kml/2.2}Placemark"):
+
+            # name = placemark.find('{http://www.opengis.net/kml/2.2}name').text
+            name_element = placemark.find("{http://www.opengis.net/kml/2.2}name")
             name = name_element.text if name_element is not None else "Default Name"
 
             # Check if placemark is a point
-            point_geometry = placemark.find(f"{KML_NS}Point")
+            point_geometry = placemark.find("{http://www.opengis.net/kml/2.2}Point")
             if point_geometry is not None:
-                process_point(point_geometry, name, network_id, network_name, schema_href, ignore_placemarks, geojson_nodes)
-                continue
+                # Convert KML Point to Shapely Point
+                shapely_point = Point(
+                    float(
+                        point_geometry.find(
+                            "{http://www.opengis.net/kml/2.2}coordinates"
+                        ).text.split(",")[0]
+                    ),
+                    float(
+                        point_geometry.find(
+                            "{http://www.opengis.net/kml/2.2}coordinates"
+                        ).text.split(",")[1]
+                    ),
+                )
+                # Convert Shapely Point to GeoJSON
+                node_id = str(uuid.uuid4())
+                geojson_node = {
+                    "type": "Feature",
+                    "properties": {
+                        "name": name,
+                        "id": node_id,
+                        "network": {
+                            "id": network_id,
+                            "name": network_name,
+                            "links": [
+                                {
+                                    "rel": "describedby",
+                                    "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                }
+                            ],
+                        },
+                        "featureType": "node",
+                    },
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [shapely_point.x, shapely_point.y],
+                    },
+                }
 
-            # Process MultiGeometry elements
-            multi_geometry = placemark.find(f"{KML_NS}MultiGeometry")
+                # If name does not match an element in the ignore_placemarks
+                # array, add the GeoJSON object to the list
+                is_ignored = False
+                for ignore_pattern in ignore_placemarks:
+                    if re.search(fr"{ignore_pattern}", name):
+                        is_ignored = True
+                        break
+
+                if not is_ignored:
+                    geojson_nodes.append(geojson_node)
+
+            # Look for MultiGeometry elements
+            multi_geometry = placemark.find(
+                "{http://www.opengis.net/kml/2.2}MultiGeometry"
+            )
             if multi_geometry is not None:
                 combined_coordinates = []
-                for line_string in multi_geometry.iter(f"{KML_NS}LineString"):
-                    coordinates_text = line_string.find(f"{KML_NS}coordinates").text
-                    combined_coordinates.extend(coordinates_text.split())
-                geojson_span = process_line_string(" ".join(combined_coordinates), name, network_id, network_name, schema_href)
-                if geojson_span and not is_duplicate_span(geojson_span, geojson_spans):
-                    geojson_spans.append(geojson_span)
-
-            elif placemark.find(f"{KML_NS}LineString") is not None:
-                # Look for LineStrings
-                polyline = placemark.find(f"{KML_NS}LineString")
-                if polyline is not None:
-                    coordinates_text = polyline.find(f"{KML_NS}coordinates").text
-                    geojson_span = process_line_string(coordinates_text, name, network_id, network_name, schema_href)
-                    if geojson_span and not is_duplicate_span(geojson_span, geojson_spans):
+                for line_string in multi_geometry.iter(
+                    "{http://www.opengis.net/kml/2.2}LineString"
+                ):
+                    coordinates_text = line_string.find(
+                        "{http://www.opengis.net/kml/2.2}coordinates"
+                    ).text
+                    coordinates = [
+                        tuple(map(float, coord.split(",")))
+                        for coord in coordinates_text.split()
+                    ]
+                    combined_coordinates.extend(coordinates)
+                shapely_line = LineString(combined_coordinates)
+                if shapely_line is not None:
+                    # Convert Shapely LineString to GeoJSON
+                    geojson_span = {
+                        "type": "Feature",
+                        "properties": {
+                            "id": "",
+                            "name": name,
+                            "network": {
+                                "id": network_id,
+                                "name": network_name,
+                                "links": [
+                                    {
+                                        "rel": "describedby",
+                                        "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                    }
+                                ],
+                            },
+                            "featureType": "span",
+                        },
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [(x, y) for x, y, *_ in shapely_line.coords],
+                        },
+                    }
+                    # Check for duplicates before adding the GeoJSON object to the list
+                    is_span_duplicate = any(
+                        span["properties"]["name"] == name
+                        and span["geometry"]["coordinates"]
+                        == geojson_span["geometry"]["coordinates"]
+                        for span in geojson_spans
+                    )
+                    # If not a duplicate, add the GeoJSON object to the list
+                    if not is_span_duplicate:
                         geojson_spans.append(geojson_span)
+
+            elif (
+                placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
+            ):
+                # Look for LineStrings
+                polyline = placemark.find("{http://www.opengis.net/kml/2.2}LineString")
+                if polyline is not None:
+                    coordinates_text = polyline.find(
+                        "{http://www.opengis.net/kml/2.2}coordinates"
+                    ).text
+                    coordinates = [
+                        tuple(map(float, coord.split(",")))
+                        for coord in coordinates_text.split()
+                    ]
+                    # Convert to Shapely LineString
+                    # ignore linestrings with only one point
+                    if len(coordinates) > 1:
+                        shapely_line = LineString(coordinates)
+
+                    if shapely_line is not None:
+                        # Convert Shapely LineString to GeoJSON
+                        geojson_span = {
+                            "type": "Feature",
+                            "properties": {
+                                "id": "",
+                                "name": name,
+                                "network": {
+                                    "id": network_id,
+                                    "name": network_name,
+                                    "links": [
+                                        {
+                                            "rel": "describedby",
+                                            "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                        }
+                                    ],
+                                },
+                                "featureType": "span",
+                            },
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [
+                                    (x, y) for x, y, *_ in shapely_line.coords
+                                ],
+                            },
+                        }
+                        # Check for duplicates before adding the GeoJSON object to the list
+                        is_span_duplicate = any(
+                            span["properties"]["name"] == name
+                            and span["geometry"]["coordinates"]
+                            == geojson_span["geometry"]["coordinates"]
+                            for span in geojson_spans
+                        )
+                        # If not a duplicate, add the GeoJSON object to the list
+                        if not is_span_duplicate:
+                            geojson_spans.append(geojson_span)
 
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
-
-def process_point(point_geometry, name, network_id, network_name, schema_href, ignore_placemarks, geojson_nodes):
-    """
-    Process a point geometry and add it to the GeoJSON nodes.
-
-    Args:
-        point_geometry: The point geometry to process.
-        name (str): The name of the point.
-        network_id (str): The ID of the network.
-        network_name (str): The name of the network.
-        schema_href (str): The href of the schema.
-        ignore_placemarks (list): A list of patterns to ignore placemarks.
-        geojson_nodes (list): The list of GeoJSON nodes.
-
-    Returns:
-        None
-    """
-    shapely_point = Point(
-        float(point_geometry.find(f"{KML_NS}coordinates").text.split(",")[0]),
-        float(point_geometry.find(f"{KML_NS}coordinates").text.split(",")[1])
-    )
-    node_id = str(uuid.uuid4())
-    geojson_node = {
-        "type": "Feature",
-        "properties": {
-            "name": name,
-            "id": node_id,
-            "network": {
-                "id": network_id,
-                "name": network_name,
-                "links": [{"rel": "describedby", "href": schema_href}],
-            },
-            "featureType": "node",
-        },
-        "geometry": {
-            "type": "Point",
-            "coordinates": [shapely_point.x, shapely_point.y],
-        },
-    }
-
-    if not any(re.search(fr"{ignore_pattern}", name) for ignore_pattern in ignore_placemarks):
-        geojson_nodes.append(geojson_node)
-
-
-def process_line_string(coordinates_text, name, network_id, network_name, schema_href):
-    coordinates = [
-        tuple(map(float, coord.split(",")))
-        for coord in coordinates_text.split()
-    ]
-    if len(coordinates) > 1:
-        shapely_line = LineString(coordinates)
-        geojson_span = {
-            "type": "Feature",
-            "properties": {
-                "id": "",
-                "name": name,
-                "network": {
-                    "id": network_id,
-                    "name": network_name,
-                    "links": [
-                        {
-                            "rel": "describedby",
-                            "href": schema_href,
-                        }
-                    ],
-                },
-                "featureType": "span",
-            },
-            "geometry": {
-                "type": "LineString",
-                "coordinates": [
-                    (x, y) for x, y, *_ in shapely_line.coords
-                ],
-            },
-        }
-        return geojson_span
-    return None
-
-
-def is_duplicate_span(geojson_span, existing_spans):
-    return any(
-        span["properties"]["name"] == geojson_span["properties"]["name"]
-        and span["geometry"]["coordinates"] == geojson_span["geometry"]["coordinates"]
-        for span in existing_spans
-    )
 
 
 def snap_to_line(point, lines, tolerance=1e-4):
@@ -299,12 +353,8 @@ def snap_to_line(point, lines, tolerance=1e-4):
 
 
 def break_spans_at_node_points(
-    gdf_nodes: gpd.GeoDataFrame,
-    gdf_spans: gpd.GeoDataFrame,
-    network_name: str,
-    network_id: str,
-    network_links: str
-) -> gpd.GeoDataFrame:
+    gdf_nodes, gdf_spans, network_name, network_id, network_links
+    ):
     """
     Breaks the spans into segments at each node intersection.
 
@@ -318,85 +368,93 @@ def break_spans_at_node_points(
     Returns:
         GeoDataFrame: GeoDataFrame containing the split linestrings.
     """
-
-    # Create buffered points for all nodes at once
-    gdf_buffered_nodes = gdf_nodes.copy()
-    gdf_buffered_nodes['geometry'] = gdf_buffered_nodes.geometry.buffer(1e-9)
-
     split_lines = []
     self_intersects = []
     self_intersect = []
     feature_type = "span"
 
-    # Perform spatial join to find intersections
-    intersections = gpd.sjoin(gdf_buffered_nodes, gdf_spans, how="inner", predicate="intersects")
+    # Iterate over the spans and find the nodes that intersect each span
+    # breaking the spans into segments at each node intersection
+    for _, line_row in gdf_spans.iterrows():
+        span_name = line_row["name"]
+        buffered_points = []
+        intersected_buffered_points = []
+        point_names = []
+        intersected_points = []
 
-    for span_index, span_row in gdf_spans.iterrows():
-        span_name = span_row["name"]
-        
-        # Get intersecting nodes for this span
-        intersecting_nodes = intersections[intersections.index_right == span_index]
-        
-        if not intersecting_nodes.empty:
-            buffered_area = MultiPolygon(intersecting_nodes.geometry.tolist())
-            point_names = intersecting_nodes['name_left'].tolist()
+        # Create a buffer around each node point
+        for _, point_row in gdf_nodes.iterrows():
+            point = point_row.geometry
+            buffered_point = point.buffer(1e-9)
+            buffered_points.append(buffered_point)
 
-            # Handle self-intersecting spans
-            if span_row.geometry.is_simple:
-                split_line = split(span_row.geometry, buffered_area)
+            # Check if the line intersects the buffered point and add the point name to the point_names list
+            if line_row.geometry.intersects(buffered_point):
+                intersected_buffered_points.append(buffered_point)
+                intersected_points.append(point)
+                point_name = point_row["name"]
+                point_names.append(
+                    point_name
+                )  # Capture the name of the intersecting point
+
+        # buffered_area = MultiPolygon(intersected_buffered_points)
+        buffered_area = MultiPolygon(intersected_buffered_points)
+
+        if line_row.geometry.intersects(buffered_area):
+            # Snap each point in splitter to the nearest point on the LineString
+            # snapped_points = [snap(point, line_row.geometry, 1.0e-5) for point in intersected_points]
+            # buffered_area = MultiPoint(snapped_points)
+
+            # Check for self-intersecting spans
+            if line_row.geometry.is_simple:
+                split_line = split(line_row.geometry, buffered_area)
             else:
-                self_intersect = find_self_intersection(span_row.geometry)
+                self_intersect = find_self_intersection(line_row.geometry)
                 self_intersects.append(self_intersect)
-                split_line = split(span_row.geometry, buffered_area)
+                split_line = split(line_row.geometry, buffered_area)
                 split_line = rejoin_self_intersection_breaks(split_line, self_intersect)
 
             for segment in split_line.geoms:
+                # Check if the segment has more than 2 vertices
+                if len(segment.coords) > 2:
+                    segment_uuid = str(uuid.uuid4())
+                    # Include both polyline and point names with the geometry
+                    split_lines.append(
+                        (
+                            segment_uuid,
+                            segment,
+                            span_name,
+                            feature_type,
+                            ", ".join(point_names),
+                        )
+                    )
+        else:
+            # Generate a UUID for the original line if no intersection
+            if len(line_row.geometry.coords) > 2:
                 segment_uuid = str(uuid.uuid4())
                 split_lines.append(
-                    (
-                        segment_uuid,
-                        segment,
-                        span_name,
-                        feature_type,
-                        ", ".join(point_names),
-                    )
+                    (segment_uuid, line_row.geometry, span_name, feature_type, "")
                 )
-        else:
-            # No intersections, keep original span
-            segment_uuid = str(uuid.uuid4())
-            split_lines.append(
-                (segment_uuid, span_row.geometry, span_name, feature_type, "")
-            )
 
     # Create a new GeoDataFrame from the split linestrings
-    gdf_split_spans = gpd.GeoDataFrame(
+    gdf_spans = gpd.GeoDataFrame(
         split_lines, columns=["id", "geometry", "name", "featureType", "pointNames"]
     )
 
     # Add network metadata to the split spans GeoDataFrame
-    gdf_split_spans = gdf_split_spans.apply(
+    gdf_spans = gdf_spans.apply(
         lambda row: update_network_field(row, network_name, network_id, network_links),
         axis=1,
     )
 
-    # Handle self-intersects if any
-    if self_intersects:
-        gdf_intersects = gpd.GeoDataFrame(geometry=self_intersects, crs=gdf_split_spans.crs)
+    gdf_intersects = gpd.GeoDataFrame(geometry=self_intersects, crs=gdf_spans.crs)
+    if not gdf_intersects.empty:
         gdf_intersects.to_file("output/intersects.geojson", driver="GeoJSON")
 
-    return gdf_split_spans
+    return gdf_spans
 
 
 def find_self_intersection(line):
-    """
-    Find self-intersections in a LineString.
-
-    Args:
-        line (LineString): The LineString to check for self-intersections.
-
-    Returns:
-        MultiPoint or None: A MultiPoint object representing the self-intersections, or None if no self-intersections are found.
-    """
     intersection = None
     if not line.is_simple:
         intersection = unary_union(line)
@@ -409,62 +467,57 @@ def find_self_intersection(line):
 
 
 def rejoin_self_intersection_breaks(split_lines, intersect_points):
-    """
-    Rejoin self-intersection breaks in a set of split lines.
 
-    Args:
-        split_lines (GeometryCollection): The split lines to rejoin.
-        intersect_points (MultiPoint): The points representing the self-intersections.
-
-    Returns:
-        GeometryCollection: A GeometryCollection containing the rejoined lines.
-
-    Examples:
-        >>> split_lines = ...
-        >>> intersect_points = ...
-        >>> rejoin_lines = rejoin_self_intersection_breaks(split_lines, intersect_points)
-    """
     joined_lines = []
     i = 0
-    
+
     while i < len(split_lines.geoms):
         current_line = split_lines.geoms[i]
-        joined_line = current_line
-        
-        while i + 1 < len(split_lines.geoms):
-            next_line = split_lines.geoms[i + 1]
-            next_start_point = Point(next_line.coords[0])
-            
-            if (joined_line.coords[-1] == next_line.coords[0] and 
-                intersect_points.contains(next_start_point)):
-                joined_line = LineString(list(joined_line.coords)[:-1] + list(next_line.coords)[1:])
-                i += 1
-            else:
-                break
-        
-        joined_lines.append(joined_line)
-        i += 1
 
-    return GeometryCollection(joined_lines)
+        # Access the next line
+        if i + 1 < len(split_lines.geoms):
+            next_line = split_lines.geoms[i + 1]
+            point_to_check = Point(next_line.coords[0])
+
+            # Check if the last point of line1 is equal to the first point of line2
+            if current_line.coords[-1] == next_line.coords[
+                0
+            ] and intersect_points.contains(point_to_check):
+
+                joined_line = LineString(
+                    list(current_line.coords)[:-1] + list(next_line.coords)[1:]
+                )
+                i += 1  # Increment i by 1 to skip the next line
+                current_line = split_lines.geoms[i]
+                if i + 1 < len(split_lines.geoms):
+                    next_line = split_lines.geoms[i + 1]
+                while (
+                    current_line.coords[-1] == next_line.coords[0]
+                    and intersect_points.contains(Point(next_line.coords[0]))
+                    and i + 2 < len(split_lines.geoms)
+                ):
+                    joined_line = LineString(
+                        list(joined_line.coords)[:-1] + list(next_line.coords)[1:]
+                    )
+                    i += 1
+                    current_line = split_lines.geoms[i]
+                    next_line = split_lines.geoms[i + 1]
+
+                joined_lines.append(joined_line)
+            else:
+                joined_lines.append(current_line)
+        else:
+            joined_lines.append(current_line)
+
+        i += 1  # Increment i by 1 for the next iteration
+
+    geometry_collection = GeometryCollection(joined_lines)
+    return geometry_collection
 
 
 def add_missing_nodes(
     gdf_spans, gdf_nodes, network_id, network_name, network_links, tolerance=1e-6
 ):
-    """
-    Add missing nodes to spans in order to ensure that each segment has a start and end node.
-
-    Args:
-        gdf_spans (GeoDataFrame): The GeoDataFrame containing the spans.
-        gdf_nodes (GeoDataFrame): The GeoDataFrame containing the existing nodes.
-        network_id (str): The ID of the network.
-        network_name (str): The name of the network.
-        network_links (list): The list of network links.
-        tolerance (float, optional): The tolerance value for buffer operations. Defaults to 1e-6.
-
-    Returns:
-        tuple: A tuple containing two GeoDataFrames. The first GeoDataFrame is the combined nodes with the added missing nodes, and the second GeoDataFrame is the newly added nodes.
-    """
     # Ensure that each segment has a start and end node
     # If not, add the missing nodes to the ofds_points_gdf
     new_nodes = []  # Store new nodes to be appended to the ofds_points_gdf
@@ -483,15 +536,11 @@ def add_missing_nodes(
         # Add points if they don't exist
         if not start_exists:
             new_node = append_node(start_point, network_id, network_name, network_links)
-            if all(
-                new_node["geometry"] != node["geometry"] for node in new_nodes
-            ):
+            if not any(new_node["geometry"] == node["geometry"] for node in new_nodes):
                 new_nodes.append(new_node)
         if not end_exists:
             new_node = append_node(end_point, network_id, network_name, network_links)
-            if all(
-                new_node["geometry"] != node["geometry"] for node in new_nodes
-            ):
+            if not any(new_node["geometry"] == node["geometry"] for node in new_nodes):
                 new_nodes.append(new_node)
 
     # Convert the list of new nodes into a GeoDataFrame
@@ -499,9 +548,9 @@ def add_missing_nodes(
         # print(new_nodes[:5])
         new_nodes_gdf = gpd.GeoDataFrame.from_features(new_nodes, crs=gdf_nodes.crs)
         combined_gdf_nodes = pd.concat([gdf_nodes, new_nodes_gdf], ignore_index=True)
-        print(
-            f"Total number of nodes after adding nodes to unterminated spans: {len(combined_gdf_nodes)}"
-        )
+        # print(
+        #     f"Adding {len(new_nodes_gdf)} nodes to a total of {len(combined_gdf_nodes)} nodes"
+        # )
     else:
         combined_gdf_nodes = gdf_nodes
 
@@ -514,18 +563,6 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
     end_points = []
     counter = 0
 
-    def create_point_info(point):
-        if point is None:
-            return None
-        return {
-            "id": point["id"],
-            "name": point["name"],
-            "location": {
-                "type": "Point",
-                "coordinates": [point.geometry.x, point.geometry.y],
-            },
-        }
-
     for _, span in gdf_spans.iterrows():
         start_point_geom = span.geometry.coords[0]
         end_point_geom = span.geometry.coords[-1]
@@ -535,18 +572,38 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
         matching_end_point = find_end_point(end_point_geom, gdf_nodes)
 
         if matching_start_point is not None:
-            start_point_info = create_point_info(matching_start_point)
+            start_points_info = {
+                "id": matching_start_point["id"],
+                "name": matching_start_point["name"],
+                "location": {
+                    "type": "Point",
+                    "coordinates": [
+                        matching_start_point.geometry.x,
+                        matching_start_point.geometry.y,
+                    ],
+                },
+            }
         else:
-            start_point_info = None
+            start_points_info = None
 
         if matching_end_point is not None:
-            end_point_info = create_point_info(matching_end_point)
+            end_points_info = {
+                "id": matching_end_point["id"],
+                "name": matching_end_point["name"],
+                "location": {
+                    "type": "Point",
+                    "coordinates": [
+                        matching_end_point.geometry.x,
+                        matching_end_point.geometry.y,
+                    ],
+                },
+            }
         else:
-            end_point_info = None
+            end_points_info = None
 
         # Append the matching points information to the lists
-        start_points.append(start_point_info)
-        end_points.append(end_point_info)
+        start_points.append(start_points_info)
+        end_points.append(end_points_info)
         # Increment the counter and display the progress
         counter += 1
         print(
@@ -571,7 +628,6 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
 
 def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
-    print("\nMerging auto-generated nodes that are in close proximity to each other...")
     
     filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes["name"] == "Auto generated missing node"]
     # Extract coordinates as a 2D array
@@ -599,6 +655,7 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
             if start_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
                 start_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+
                 # update the span geometry to match the merged node
                 new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
                 span_geometry = span['geometry']
@@ -607,9 +664,11 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
                 gdf_ofds_spans.at[index, 'geometry'] = span_geometry
+
             elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
                 end_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
                 merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+
                 # update the span geometry to match the merged node
                 new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
                 span_geometry = span['geometry']
@@ -637,7 +696,6 @@ def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
 
 def merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
-    print("Merging auto-generated nodes that are in close proximity to a named node...")
 
     # Extract coordinates as a 2D array
     coordinates = np.array([(point.x, point.y) for point in gdf_ofds_nodes.geometry])
@@ -707,6 +765,53 @@ def merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, thres
     return gdf_ofds_spans, gdf_ofds_nodes
 
 
+def join_node_terminating_near_span(gdf_ofds_nodes, gdf_ofds_spans, threshold):
+    # Filter nodes that are auto-generated missing nodes
+    print(f"Total number of nodes: {len(gdf_ofds_nodes)}")
+    # Function to safely extract ID from a dictionary or string
+    def extract_id(x):
+        if isinstance(x, dict):
+            return x.get('id')
+        elif isinstance(x, str):
+            try:
+                return json.loads(x).get('id')
+            except json.JSONDecodeError:
+                return x
+        return x
+
+    # Extract start and end IDs
+    start_ids = gdf_ofds_spans['start'].apply(extract_id)
+    end_ids = gdf_ofds_spans['end'].apply(extract_id)
+
+    # Combine start and end IDs
+    all_ids = pd.concat([start_ids, end_ids])
+    # Count occurrences of each ID
+    id_counts = all_ids.value_counts()
+    print("Number of unique IDs in spans:", len(id_counts))
+    print("IDs that appear only once:", sum(id_counts == 1))
+    print("Sample of id_counts:")
+    print(id_counts.head())
+
+    #  Find IDs that appear only once
+    single_occurrence_ids = id_counts[id_counts == 1].index
+    # Filter gdf_ofds_nodes
+    filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes['id'].isin(single_occurrence_ids)]
+
+    print("\nNumber of filtered nodes:", len(filtered_nodes))
+
+    # Print the name and ID for each filtered node
+    print("\nFiltered Nodes (Name and ID):")
+    for _, node in filtered_nodes.iterrows():
+        print(f"Name: {node['name']}, ID: {node['id']}")
+
+    # Check for partial matches
+    def find_partial_matches(node_id, span_ids):
+        return any(str(node_id) in str(span_id) for span_id in span_ids)
+
+
+
+
+
 def find_end_point(span_endpoint, gdf_nodes, tolerance=1e-3):
     point_geom = Point(span_endpoint)
     # Create a buffer around the point with the specified tolerance
@@ -773,6 +878,7 @@ def convert_to_serializable(obj):
         return obj
 
 
+
 @click.command(help="Convert KML files to the Open Fibre Data Standard format.")
 @click.option('--kml-file', help='KML file to convert to OFDS.', required=True)
 @click.option('--output-name-prefix', help='Prefix name for output files.')
@@ -780,62 +886,134 @@ def convert_to_serializable(obj):
 @click.option('--output-dir', default='output/', help='Directory to save converted files.')
 @click.option('--network-profile', default='default.profile', help='Load variables from network profile.')
 
-
 def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
    
+    #config_file = "kml2ofds.ini"
     network_prof = load_config(network_profile)
 
-    # Default directories
-    default_input_dir = Path("./input")
-    default_output_dir = Path("./output")
-
     # set network name,id, and links
-    network_name = network_prof.get("network_name", "Default Network Name")
-    network_id = network_prof.get("network_id" or str(uuid.uuid4())) or str(uuid.uuid4())
-    network_link_url = network_prof.get("network_links", "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json")
+    if not network_prof["network_name"]:
+        network_name = "Default Network Name"
+        print("Network name not found in config file. Using default value.")
+    else:
+        network_name = network_prof["network_name"]
+
+    if not network_prof["network_id"]:
+        network_id = str(uuid.uuid4())
+    else:
+        network_id = network_prof["network_id"]
+
+    if not network_prof["network_links"]:
+        network_link_url = "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json"
+        print("Network links not found in config file. Using default value.")
+    else:
+        network_link_url = network_prof["network_links"]
+
     network_links = [{"rel": "describedby", "href": network_link_url}]
-    ignore_placemarks = [p.strip() for p in network_prof.get("ignore_placemarks", "").split(";") if p.strip()]
+
+    if not network_prof["ignore_placemarks"]:
+        ignore_placemarks = []
+    else:
+        ignore_placemarks = network_prof["ignore_placemarks"].split(";")
 
     # output files
-    today = datetime.now()
+    today = datetime.today()
     date_string = today.strftime("%d%b%Y").lower()
+    if not network_prof["input_directory"] and not input_dir:
+        input_directory = "input/"
+    elif network_prof["input_directory"]:
+        input_directory = network_prof["input_directory"]
+        intput_directory = network_prof["input_directory"]  if network_prof["input_directory"].endswith('/') else network_prof["input_directory"] + '/'
+    else:
+        input_directory = input_dir if input_dir.endswith('/') else input_dir + '/'
 
-    input_directory = Path(network_prof.get("input_directory") or default_input_dir).resolve()
-    output_directory = Path(network_prof.get("output_directory") or default_output_dir).resolve()
 
-    input_directory.mkdir(parents=True, exist_ok=True)
-    output_directory.mkdir(parents=True, exist_ok=True)
+    if not network_prof["output_directory"] and not output_dir:
+        output_directory = "output/"
+    elif network_prof["output_directory"]:
+        output_directory = network_prof["output_directory"]  if network_prof["output_directory"].endswith('/') else network_prof["output_directory"] + '/'
+    else:
+        output_directory = output_dir if output_dir.endswith('/') else output_dir + '/'
 
-    kml_fullpath = input_directory / kml_file
+    # Check if input_directory exists, if not, create it
+    if not os.path.exists(input_directory):
+        os.makedirs(input_directory)
 
+    # Check if output_directory exists, if not, create it
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    directory = os.path.join(os.getcwd(), input_directory)
+    kml_fullpath = os.path.join(directory, kml_file)
+
+    # set file names
     network_filename_normalised = kml_file.replace(" ", "_").upper()
-    output_name_prefix = output_name_prefix or network_filename_normalised[:3]
 
-    nodes_ofds_output = output_directory / f"{output_name_prefix}_ofds-nodes_{date_string}.geojson"
-    spans_ofds_output = output_directory / f"{output_name_prefix}_ofds-spans_{date_string}.geojson"
-    ofds_json_output = output_directory / f"{output_name_prefix}_ofds-json_{date_string}.json"
+    if not output_name_prefix:
+        output_name_prefix = network_filename_normalised[:3]
+
+    nodes_ofds_output = (
+        output_directory
+        + output_name_prefix
+        + "_ofds-nodes_"
+        + date_string
+        + ".geojson"
+    )
+    # print(nodes_ofds_output)
+
+    spans_ofds_output = (
+        output_directory
+        + output_name_prefix
+        + "_ofds-spans_"
+        + date_string
+        + ".geojson"
+    )
+
+    ofds_json_output = (
+        output_directory
+        + output_name_prefix
+        + "_ofds-json_"
+        + date_string
+        + ".json"
+    )
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
     gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name, ignore_placemarks)
 
-    # Break spans at node points
+    min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Breaking spans at node points. {len(gdf_spans)} spans, smallest span {min_vert}")
     gdf_spans = break_spans_at_node_points(
         gdf_ofds_nodes, gdf_spans, network_name, network_id, network_links
     )
-    print("Number of spans after breaking at node points:", len(gdf_spans))
+    min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Breaking spans complete. {len(gdf_spans)} spans, smallest span {min_vert}\n")
 
     # Check for any spans that do not have a node at the start or end point and add as needed
     gdf_ofds_nodes, gdf_auto_gen_nodes = add_missing_nodes(
         gdf_spans, gdf_ofds_nodes, network_id, network_name, network_links
     )
     # Add information on the start and end nodes to the spans
+    min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Adding nodes to spans. {len(gdf_spans)} spans, smallest span {min_vert}")
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
-
+    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Added odes to spans. {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
+    
     # Merge nearby auto-generated nodes that are in close proximity to each other
+    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Merging nearby autogen. {len(gdf_ofds_spans)} spans, smallest span {min_vert}")
     gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-1)
-
+    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Merged nearby autogen. {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
+    
     # Merge nearby auto-generated nodes that are in close proximity propoer nodes
+    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Merging nearby autogen and proper nodes. {len(gdf_ofds_spans)} spans, smallest span {min_vert}")
     gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-3)
+    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    print(f"Merging nearby autogen and proper nodes. {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
+    
+    # join_node_terminating_near_span(gdf_ofds_nodes,gdf_ofds_spans,1e-1)
 
     # Save the results to geojson files
     gdf_ofds_spans.to_file(spans_ofds_output, driver="GeoJSON")
@@ -859,12 +1037,17 @@ def main(kml_file, input_dir, output_dir, network_profile, output_name_prefix):
     with open(ofds_json_output, 'w') as json_file:
         json.dump(ofds_json, json_file, indent=4)
 
-    # schema = OFDSSchema()
-    # schema_worker = JSONSchemaValidator(schema)
-    # out = schema_worker.validate(ofds_json)
-    # print("\nValidating schema...")
-    # print([i.json() for i in out])    
-    # print(worker.get_meta_json())
+    schema = OFDSSchema()
+    # validator = JSONSchemaValidator(schema)
+    validator = PythonValidate(schema)
+    result = validator.validate(ofds_json)
+    
+    if not result:
+        print("Validation successful")
+    else:
+        print("Validation failed")
+        for error in result:
+            print(error)
 
     print("Complete")
 
