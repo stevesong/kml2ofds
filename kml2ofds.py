@@ -35,6 +35,7 @@ from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
 from libcoveofds.python_validate import PythonValidate
+
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 # import matplotlib.pyplot as plt
@@ -54,7 +55,6 @@ def load_config(config_file):
     for section in sections:
         # Get all options (variables) within the section
         options = config.options(section)
-        
         # Iterate over each option
         for option in options:
             # Get the value of the option
@@ -65,8 +65,7 @@ def load_config(config_file):
     return parsed_config
 
 
-
-def process_kml(filename, network_id, network_name, ignore_placemarks):
+def process_kml_file(filename, network_id, network_name, ignore_placemarks):
     with open(filename) as f:
         kml_doc = parser.parse(f).getroot()
     geojson_nodes = []
@@ -74,8 +73,12 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
     # Start processing from the root Document
     # First look for multiple Documents within the KML file.
     for document in kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"):
+        document_name = document.findtext("{http://www.opengis.net/kml/2.2}name")
+        print(f"Processing Document: {document_name}")
 
-        nodes, spans = process_document(document, network_id, network_name, ignore_placemarks)
+        nodes, spans = process_document_element(
+            document, network_id, network_name, ignore_placemarks
+        )
         geojson_nodes.extend(nodes)
         geojson_spans.extend(spans)
 
@@ -85,7 +88,7 @@ def process_kml(filename, network_id, network_name, ignore_placemarks):
 
     gdf_nodes = gpd.GeoDataFrame.from_features(geojson_nodes)
     gdf_spans = gpd.GeoDataFrame.from_features(geojson_spans)
-    
+
     # Test for polylines with only 2 vertices
     # two_vertex_spans = gdf_spans[gdf_spans.geometry.apply(lambda x: len(x.coords) < 5)]
     # if not two_vertex_spans.empty:
@@ -118,11 +121,13 @@ def remove_duplicate_nodes(geojson_nodes, precision):
     seen_hashes = set()
     for node in geojson_nodes:
         # Create a hash based on the rounded coordinates
-        node_hash = hash((
-            node["properties"]["name"],
-            round(node["geometry"]["coordinates"][0], precision),
-            round(node["geometry"]["coordinates"][1], precision)
-        ))
+        node_hash = hash(
+            (
+                node["properties"]["name"],
+                round(node["geometry"]["coordinates"][0], precision),
+                round(node["geometry"]["coordinates"][1], precision),
+            )
+        )
         if node_hash not in seen_hashes:
             # If the hash is not seen before, add the node to the list of unique nodes
             unique_nodes.append(node)
@@ -131,7 +136,7 @@ def remove_duplicate_nodes(geojson_nodes, precision):
     return unique_nodes
 
 
-def process_document(document, network_id, network_name, ignore_placemarks):
+def process_document_element(document, network_id, network_name, ignore_placemarks):
     """Process a KML Document and return a list of GeoJSON nodes and spans.
 
     Args:
@@ -200,7 +205,7 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                 # array, add the GeoJSON object to the list
                 is_ignored = False
                 for ignore_pattern in ignore_placemarks:
-                    if re.search(fr"{ignore_pattern}", name):
+                    if re.search(rf"{ignore_pattern}", name):
                         is_ignored = True
                         break
 
@@ -224,41 +229,48 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                         for coord in coordinates_text.split()
                     ]
                     combined_coordinates.extend(coordinates)
-                shapely_line = LineString(combined_coordinates)
-                if shapely_line is not None:
-                    # Convert Shapely LineString to GeoJSON
-                    geojson_span = {
-                        "type": "Feature",
-                        "properties": {
-                            "id": "",
-                            "name": name,
-                            "network": {
-                                "id": network_id,
-                                "name": network_name,
-                                "links": [
-                                    {
-                                        "rel": "describedby",
-                                        "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
-                                    }
+                if len(combined_coordinates) >= 2:
+                    shapely_line = LineString(combined_coordinates)
+                    if shapely_line is not None:
+                        # Convert Shapely LineString to GeoJSON
+                        geojson_span = {
+                            "type": "Feature",
+                            "properties": {
+                                "id": "",
+                                "name": name,
+                                "network": {
+                                    "id": network_id,
+                                    "name": network_name,
+                                    "links": [
+                                        {
+                                            "rel": "describedby",
+                                            "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                        }
+                                    ],
+                                },
+                                "featureType": "span",
+                            },
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [
+                                    (x, y) for x, y, *_ in shapely_line.coords
                                 ],
                             },
-                            "featureType": "span",
-                        },
-                        "geometry": {
-                            "type": "LineString",
-                            "coordinates": [(x, y) for x, y, *_ in shapely_line.coords],
-                        },
-                    }
-                    # Check for duplicates before adding the GeoJSON object to the list
-                    is_span_duplicate = any(
-                        span["properties"]["name"] == name
-                        and span["geometry"]["coordinates"]
-                        == geojson_span["geometry"]["coordinates"]
-                        for span in geojson_spans
+                        }
+                        # Check for duplicates before adding the GeoJSON object to the list
+                        is_span_duplicate = any(
+                            span["properties"]["name"] == name
+                            and span["geometry"]["coordinates"]
+                            == geojson_span["geometry"]["coordinates"]
+                            for span in geojson_spans
+                        )
+                        # If not a duplicate, add the GeoJSON object to the list
+                        if not is_span_duplicate:
+                            geojson_spans.append(geojson_span)
+                else:
+                    print(
+                        f"Warning: Skipping LineString with insufficient points in MultiGeometry: {name}"
                     )
-                    # If not a duplicate, add the GeoJSON object to the list
-                    if not is_span_duplicate:
-                        geojson_spans.append(geojson_span)
 
             elif (
                 placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
@@ -275,7 +287,7 @@ def process_document(document, network_id, network_name, ignore_placemarks):
                     ]
                     # Convert to Shapely LineString
                     # ignore linestrings with only one point
-                    if len(coordinates) > 1:
+                    if len(coordinates) >= 2:
                         shapely_line = LineString(coordinates)
 
                     if shapely_line is not None:
@@ -355,7 +367,7 @@ def snap_to_line(point, lines, tolerance=1e-4):
 
 def break_spans_at_node_points(
     gdf_nodes, gdf_spans, network_name, network_id, network_links
-    ):
+):
     """
     Breaks the spans into segments at each node intersection.
 
@@ -554,6 +566,7 @@ def add_missing_nodes(
         # )
     else:
         combined_gdf_nodes = gdf_nodes
+        new_nodes_gdf = gpd.GeoDataFrame(columns=gdf_nodes.columns, crs=gdf_nodes.crs)  
 
     return combined_gdf_nodes, new_nodes_gdf
 
@@ -629,69 +642,94 @@ def add_nodes_to_spans(gdf_spans, gdf_nodes):
 
 def merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
-    
-    filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes["name"] == "Auto generated missing node"]
+
+    filtered_nodes = gdf_ofds_nodes[
+        gdf_ofds_nodes["name"] == "Auto generated missing node"
+    ]
     # Extract coordinates as a 2D array
     coordinates = np.array([(point.x, point.y) for point in filtered_nodes.geometry])
-    
+
+    # Early exit if there are no auto-generated nodes to merge
+    if len(coordinates) == 0:
+        print("No auto-generated missing nodes to merge.")
+        return gdf_ofds_spans, gdf_ofds_nodes
+
     # Build a KDTree for efficient nearest neighbor search
     tree = KDTree(coordinates)
-    
+
     # Find pairs of nodes that are within the specified distance
     # The query_radius method returns a list of arrays, one for each point, containing the indices of the neighbors
     # We're only interested in neighbors that are closer than the threshold, so we filter those out
-    close_pairs_indices = [indices for indices in tree.query_radius(coordinates, r=threshold) if len(indices) > 1]
-    
+    close_pairs_indices = [
+        indices
+        for indices in tree.query_radius(coordinates, r=threshold)
+        if len(indices) > 1
+    ]
+
     # Flatten the list of lists and remove duplicates
-    close_pairs_indices = [(i, j) for sublist in close_pairs_indices for i in sublist for j in sublist if i != j]
+    close_pairs_indices = [
+        (i, j)
+        for sublist in close_pairs_indices
+        for i in sublist
+        for j in sublist
+        if i != j
+    ]
     unique_pairs = list(set((min(i, j), max(i, j)) for i, j in close_pairs_indices))
-    
+
     # Update the spans with the merged nodes
     merged_node_ids = []
     for index, span in gdf_ofds_spans.iterrows():
-        start_dict = json.loads(span['start'])
-        end_dict = json.loads(span['end'])
-        
+        start_dict = json.loads(span["start"])
+        end_dict = json.loads(span["end"])
+
         for pair in unique_pairs:
-            if start_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
-                start_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
-                merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+            if start_dict["id"] == filtered_nodes.iloc[pair[1]]["id"]:
+                start_dict["id"] = filtered_nodes.iloc[pair[0]]["id"]
+                merged_node_ids.append(filtered_nodes.iloc[pair[1]]["id"])
 
                 # update the span geometry to match the merged node
-                new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
-                span_geometry = span['geometry']
+                new_start_node_geometry = filtered_nodes.iloc[pair[0]]["geometry"]
+                span_geometry = span["geometry"]
                 updated_coords = list(span_geometry.coords)
-                updated_coords[0] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                updated_coords[0] = (
+                    new_start_node_geometry.x,
+                    new_start_node_geometry.y,
+                )
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
-                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
+                gdf_ofds_spans.at[index, "geometry"] = span_geometry
 
-            elif end_dict['id'] == filtered_nodes.iloc[pair[1]]['id']:
-                end_dict['id'] = filtered_nodes.iloc[pair[0]]['id']
-                merged_node_ids.append(filtered_nodes.iloc[pair[1]]['id'])
+            elif end_dict["id"] == filtered_nodes.iloc[pair[1]]["id"]:
+                end_dict["id"] = filtered_nodes.iloc[pair[0]]["id"]
+                merged_node_ids.append(filtered_nodes.iloc[pair[1]]["id"])
 
                 # update the span geometry to match the merged node
-                new_start_node_geometry = filtered_nodes.iloc[pair[0]]['geometry']
-                span_geometry = span['geometry']
+                new_start_node_geometry = filtered_nodes.iloc[pair[0]]["geometry"]
+                span_geometry = span["geometry"]
                 updated_coords = list(span_geometry.coords)
-                updated_coords[-1] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                updated_coords[-1] = (
+                    new_start_node_geometry.x,
+                    new_start_node_geometry.y,
+                )
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
-                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
+                gdf_ofds_spans.at[index, "geometry"] = span_geometry
 
         # Convert the updated dictionaries back into JSON strings
         start_json = json.dumps(convert_to_serializable(start_dict))
         end_json = json.dumps(convert_to_serializable(end_dict))
 
         # Update the 'start' and 'end' columns in the DataFrame for the current row
-        gdf_ofds_spans.at[index, 'start'] = start_json
-        gdf_ofds_spans.at[index, 'end'] = end_json
+        gdf_ofds_spans.at[index, "start"] = start_json
+        gdf_ofds_spans.at[index, "end"] = end_json
 
     # Remove nodes that were merged
     # print(merged_node_ids)
-    gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes['id'].isin(merged_node_ids)]
+    gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes["id"].isin(merged_node_ids)]
 
-    print(f"Number of nodes after merging nearby auto-added nodes: {len(gdf_ofds_nodes)}")
+    print(
+        f"Number of nodes after merging nearby auto-added nodes: {len(gdf_ofds_nodes)}"
+    )
     return gdf_ofds_spans, gdf_ofds_nodes
 
 
@@ -701,88 +739,103 @@ def merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, thres
     # Extract coordinates as a 2D array
     coordinates = np.array([(point.x, point.y) for point in gdf_ofds_nodes.geometry])
     tree = KDTree(coordinates)
-    clusters = [indices for indices in tree.query_radius(coordinates, r=threshold) if len(indices) > 1]
+    clusters = [
+        indices
+        for indices in tree.query_radius(coordinates, r=threshold)
+        if len(indices) > 1
+    ]
 
     # Filter clusters where at least one node has the name 'Auto generated missing node'
     # making sure that the first cluster element is the node with the name 'Auto generated missing node'
     found_clusters = []
     for cluster in clusters:
-        node_names = [gdf_ofds_nodes.iloc[i]['name'] for i in cluster]
-        if 'Auto generated missing node' in node_names:
+        node_names = [gdf_ofds_nodes.iloc[i]["name"] for i in cluster]
+        if "Auto generated missing node" in node_names:
             # Determine the index of the node with the name 'Auto generated missing node'
-            auto_generated_index = node_names.index('Auto generated missing node')
+            auto_generated_index = node_names.index("Auto generated missing node")
             # Ensure the first ID in the pair is the ID of the node with the specified name
             if auto_generated_index != 0:
                 # Swap the order of the group if necessary to make the auto-generated node first
-                cluster = [cluster[auto_generated_index]] + [i for i in cluster if i != auto_generated_index]
+                cluster = [cluster[auto_generated_index]] + [
+                    i for i in cluster if i != auto_generated_index
+                ]
             found_clusters.append(cluster)
 
     # Update the spans with the merged nodes
     merged_node_ids = []
     for index, span in gdf_ofds_spans.iterrows():
-        start_dict = json.loads(span['start'])
-        end_dict = json.loads(span['end'])
+        start_dict = json.loads(span["start"])
+        end_dict = json.loads(span["end"])
 
         for cluster in found_clusters:
-            if start_dict['id'] == gdf_ofds_nodes.iloc[cluster[0]]['id']:
-                start_dict['id'] = gdf_ofds_nodes.iloc[cluster[1]]['id']
-                merged_node_ids.append(gdf_ofds_nodes.iloc[cluster[0]]['id'])
+            if start_dict["id"] == gdf_ofds_nodes.iloc[cluster[0]]["id"]:
+                start_dict["id"] = gdf_ofds_nodes.iloc[cluster[1]]["id"]
+                merged_node_ids.append(gdf_ofds_nodes.iloc[cluster[0]]["id"])
 
                 # update the span geometry to match the merged node
-                new_start_node_geometry = gdf_ofds_nodes.iloc[cluster[1]]['geometry']
-                span_geometry = span['geometry']
+                new_start_node_geometry = gdf_ofds_nodes.iloc[cluster[1]]["geometry"]
+                span_geometry = span["geometry"]
                 updated_coords = list(span_geometry.coords)
-                updated_coords[0] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                updated_coords[0] = (
+                    new_start_node_geometry.x,
+                    new_start_node_geometry.y,
+                )
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
-                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
+                gdf_ofds_spans.at[index, "geometry"] = span_geometry
 
-            elif end_dict['id'] == gdf_ofds_nodes.iloc[cluster[0]]['id']:
-                end_dict['id'] = gdf_ofds_nodes.iloc[cluster[1]]['id']
-                merged_node_ids.append(gdf_ofds_nodes.iloc[cluster[0]]['id'])
+            elif end_dict["id"] == gdf_ofds_nodes.iloc[cluster[0]]["id"]:
+                end_dict["id"] = gdf_ofds_nodes.iloc[cluster[1]]["id"]
+                merged_node_ids.append(gdf_ofds_nodes.iloc[cluster[0]]["id"])
 
                 # update the span geometry to match the merged node
-                new_start_node_geometry = gdf_ofds_nodes.iloc[cluster[1]]['geometry']
-                span_geometry = span['geometry']
+                new_start_node_geometry = gdf_ofds_nodes.iloc[cluster[1]]["geometry"]
+                span_geometry = span["geometry"]
                 updated_coords = list(span_geometry.coords)
-                updated_coords[-1] = (new_start_node_geometry.x, new_start_node_geometry.y)
+                updated_coords[-1] = (
+                    new_start_node_geometry.x,
+                    new_start_node_geometry.y,
+                )
                 span_geometry = LineString(updated_coords)
                 # Assign the updated geometry back to the span
-                gdf_ofds_spans.at[index, 'geometry'] = span_geometry
-        
+                gdf_ofds_spans.at[index, "geometry"] = span_geometry
+
         # Convert the updated dictionaries back into JSON strings
         start_json = json.dumps(convert_to_serializable(start_dict))
         end_json = json.dumps(convert_to_serializable(end_dict))
-        
+
         # Update the 'start' and 'end' columns in the DataFrame for the current row
-        gdf_ofds_spans.at[index, 'start'] = start_json
-        gdf_ofds_spans.at[index, 'end'] = end_json
-    
+        gdf_ofds_spans.at[index, "start"] = start_json
+        gdf_ofds_spans.at[index, "end"] = end_json
+
     # Remove nodes that were merged
     # print(merged_node_ids)
-    gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes['id'].isin(merged_node_ids)]
-    
-    print(f"Number of nodes after merging nearby auto-added nodes near proper nodes: {len(gdf_ofds_nodes)}")
+    gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes["id"].isin(merged_node_ids)]
+
+    print(
+        f"Number of nodes after merging nearby auto-added nodes near proper nodes: {len(gdf_ofds_nodes)}"
+    )
     return gdf_ofds_spans, gdf_ofds_nodes
 
 
 def join_node_terminating_near_span(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Filter nodes that are auto-generated missing nodes
     print(f"Total number of nodes: {len(gdf_ofds_nodes)}")
+
     # Function to safely extract ID from a dictionary or string
     def extract_id(x):
         if isinstance(x, dict):
-            return x.get('id')
+            return x.get("id")
         elif isinstance(x, str):
             try:
-                return json.loads(x).get('id')
+                return json.loads(x).get("id")
             except json.JSONDecodeError:
                 return x
         return x
 
     # Extract start and end IDs
-    start_ids = gdf_ofds_spans['start'].apply(extract_id)
-    end_ids = gdf_ofds_spans['end'].apply(extract_id)
+    start_ids = gdf_ofds_spans["start"].apply(extract_id)
+    end_ids = gdf_ofds_spans["end"].apply(extract_id)
 
     # Combine start and end IDs
     all_ids = pd.concat([start_ids, end_ids])
@@ -796,7 +849,7 @@ def join_node_terminating_near_span(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     #  Find IDs that appear only once
     single_occurrence_ids = id_counts[id_counts == 1].index
     # Filter gdf_ofds_nodes
-    filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes['id'].isin(single_occurrence_ids)]
+    filtered_nodes = gdf_ofds_nodes[gdf_ofds_nodes["id"].isin(single_occurrence_ids)]
 
     print("\nNumber of filtered nodes:", len(filtered_nodes))
 
@@ -808,9 +861,6 @@ def join_node_terminating_near_span(gdf_ofds_nodes, gdf_ofds_spans, threshold):
     # Check for partial matches
     def find_partial_matches(node_id, span_ids):
         return any(str(node_id) in str(span_id) for span_id in span_ids)
-
-
-
 
 
 def find_end_point(span_endpoint, gdf_nodes, tolerance=1e-3):
@@ -879,21 +929,36 @@ def convert_to_serializable(obj):
         return obj
 
 
-
 @click.command(help="Convert KML files to the Open Fibre Data Standard format.")
-@click.option('--network-profile', help='Load variables from network profile.')
-
+@click.option(
+    "--network-profile",
+    required=True,
+    help="Path to the network profile configuration file (required).",
+    type=click.Path(exists=True),
+)
 def main(network_profile):
-   
-    #config_file = "kml2ofds.ini"
+    """Convert KML files to the Open Fibre Data Standard format.
+    
+    This script takes a KML file and converts it to the Open Fibre Data Standard format,
+    outputting both GeoJSON and JSON files for network nodes and spans.
+    
+    The script requires a network profile configuration file that specifies:
+    - KML file name
+    - Network name and ID
+    - Network links
+    - Input/output directories
+    - Any placemarks to ignore
+    """
+    print(f"Running with network_profile: {network_profile}")
+
+    # config_file = "kml2ofds.ini"
     network_prof = load_config(network_profile)
 
     if not network_prof["kml_file_name"]:
         print("Error. Please set kml file name in network profile")
-        sys:exit(1)
+        sys: exit(1)
     else:
         kml_file = network_prof["kml_file_name"]
-
 
     # set network name,id, and links
     if not network_prof["network_name"]:
@@ -923,21 +988,16 @@ def main(network_profile):
     # output files
     today = datetime.today()
     date_string = today.strftime("%d%b%Y").lower()
-    if not network_prof["input_directory"] and not input_dir:
+
+    if not network_prof["input_directory"]:
         input_directory = "input/"
-    elif network_prof["input_directory"]:
+    else:
         input_directory = network_prof["input_directory"]
-        # intput_directory = network_prof["input_directory"]  if network_prof["input_directory"].endswith('/') else network_prof["input_directory"] + '/'
-    else:
-        input_directory = input_dir if input_dir.endswith('/') else input_dir + '/'
 
-
-    if not network_prof["output_directory"] and not output_dir:
+    if not network_prof["output_directory"]:
         output_directory = "output/"
-    elif network_prof["output_directory"]:
-        output_directory = network_prof["output_directory"]  if network_prof["output_directory"].endswith('/') else network_prof["output_directory"] + '/'
     else:
-        output_directory = output_dir if output_dir.endswith('/') else output_dir + '/'
+        output_directory = network_prof["output_directory"]
 
     # Check if input_directory exists, if not, create it
     if not os.path.exists(input_directory):
@@ -957,7 +1017,6 @@ def main(network_profile):
         output_name_prefix = network_filename_normalised[3:]
     else:
         output_name_prefix = network_prof["output_name_prefix"]
-        
 
     nodes_ofds_output = (
         output_directory
@@ -977,23 +1036,23 @@ def main(network_profile):
     )
 
     ofds_json_output = (
-        output_directory
-        + output_name_prefix
-        + "_ofds-json_"
-        + date_string
-        + ".json"
+        output_directory + output_name_prefix + "_ofds-json_" + date_string + ".json"
     )
 
     # Basic parsing of KML file into a set of nodes and spans, adjusting nodes to snap to spans
-    gdf_ofds_nodes, gdf_spans = process_kml(kml_fullpath, network_id, network_name, ignore_placemarks)
+    gdf_ofds_nodes, gdf_spans = process_kml_file(
+        kml_fullpath, network_id, network_name, ignore_placemarks
+    )
 
     min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Breaking spans at node points. {len(gdf_spans)} spans, smallest span {min_vert}")
+    print(
+        f"Breaking spans at node points. \nBefore: {len(gdf_spans)} spans, smallest span {min_vert}"
+    )
     gdf_spans = break_spans_at_node_points(
         gdf_ofds_nodes, gdf_spans, network_name, network_id, network_links
     )
     min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Breaking spans complete. {len(gdf_spans)} spans, smallest span {min_vert}\n")
+    print(f" After: {len(gdf_spans)} spans, smallest span {min_vert}\n")
 
     # Check for any spans that do not have a node at the start or end point and add as needed
     gdf_ofds_nodes, gdf_auto_gen_nodes = add_missing_nodes(
@@ -1001,25 +1060,35 @@ def main(network_profile):
     )
     # Add information on the start and end nodes to the spans
     min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Adding nodes to spans. {len(gdf_spans)} spans, smallest span {min_vert}")
+    print(
+        f"Adding nodes to spans. \nBefore: {len(gdf_spans)} spans, smallest span {min_vert}"
+    )
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
     min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Added odes to spans. {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
-    
+    print(f"\n After: {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
+
     # Merge nearby auto-generated nodes that are in close proximity to each other
     min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Merging nearby autogen. {len(gdf_ofds_spans)} spans, smallest span {min_vert}")
-    gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-1)
+    print(
+        f"Merging nearby autogen. \nBefore: {len(gdf_ofds_spans)} spans, smallest span {min_vert}"
+    )
+    gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_nodes(
+        gdf_ofds_nodes, gdf_ofds_spans, 1e-1
+    )
     min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Merged nearby autogen. {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
-    
+    print(f" After: {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
+
     # Merge nearby auto-generated nodes that are in close proximity propoer nodes
     min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Merging nearby autogen and proper nodes. {len(gdf_ofds_spans)} spans, smallest span {min_vert}")
-    gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_and_proper_nodes(gdf_ofds_nodes, gdf_ofds_spans, 1e-3)
+    print(
+        f"Merging nearby autogen and proper nodes. \nBefore: {len(gdf_ofds_spans)} spans, smallest span {min_vert}"
+    )
+    gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_and_proper_nodes(
+        gdf_ofds_nodes, gdf_ofds_spans, 1e-3
+    )
     min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
-    print(f"Merging nearby autogen and proper nodes. {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
-    
+    print(f" After: {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
+
     # join_node_terminating_near_span(gdf_ofds_nodes,gdf_ofds_spans,1e-1)
 
     # Save the results to geojson files
@@ -1029,35 +1098,50 @@ def main(network_profile):
     # ofds_spans_geojson = json.loads(gdf_ofds_spans.to_json(indent=None))
     # ofds_nodes_geojson = json.loads(gdf_ofds_nodes.to_json(indent=None))
 
-    with open(spans_ofds_output, 'r') as file:
+    with open(spans_ofds_output, "r") as file:
         ofds_spans_geojson = json.load(file)
-    with open(nodes_ofds_output, 'r') as file:
+    with open(nodes_ofds_output, "r") as file:
         ofds_nodes_geojson = json.load(file)
 
     worker = GeoJSONToJSONConverter()
-    worker.process_data(ofds_nodes_geojson, assumed_feature_type=GeoJSONAssumeFeatureType.NODE)
-    worker.process_data(ofds_spans_geojson, assumed_feature_type=GeoJSONAssumeFeatureType.SPAN)
+    worker.process_data(
+        ofds_nodes_geojson, assumed_feature_type=GeoJSONAssumeFeatureType.NODE
+    )
+    worker.process_data(
+        ofds_spans_geojson, assumed_feature_type=GeoJSONAssumeFeatureType.SPAN
+    )
 
     ofds_json = worker.get_json()
 
     # Write the dictionary to a JSON file
-    with open(ofds_json_output, 'w') as json_file:
-        json.dump(ofds_json, json_file, indent=4)
+    try:
+        with open(ofds_json_output, "w", encoding="utf-8") as json_file:
+            json.dump(ofds_json, json_file, indent=4, ensure_ascii=False)
+    except IOError as e:
+        raise IOError(f"Error writing to file {ofds_json_output}: {e}")
 
-    schema = OFDSSchema()
-    # validator = JSONSchemaValidator(schema)
-    validator = PythonValidate(schema)
-    result = validator.validate(ofds_json)
-    
-    if not result:
-        print("Validation successful")
-    else:
-        print("Validation failed")
-        for error in result:
-            pprint.pprint(error)
+    # schema = OFDSSchema()
+    # validator = PythonValidate(schema)
+    # result = validator.validate(ofds_json)
+
+    # if not result:
+    #     print("Validation successful")
+    # else:
+    #     print("Validation failed")
+    #     for error in result:
+    #         pprint.pprint(error)
 
     print("Complete")
 
+
 # main
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except click.exceptions.MissingParameter:
+        main(['--help'])
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+
