@@ -27,6 +27,7 @@ from shapely.geometry import (
     GeometryCollection,
     MultiPoint,
 )
+from shapely.geometry import MultiLineString
 from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
@@ -35,6 +36,7 @@ from libcoveofds.geojson import GeoJSONToJSONConverter, GeoJSONAssumeFeatureType
 from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
 from libcoveofds.python_validate import PythonValidate
+from pathlib import Path
 
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
@@ -108,8 +110,10 @@ def process_kml_file(filename, network_id, network_name, ignore_placemarks):
 
     # Create a new GeoDataFrame with the snapped points and geojson features
     gdf_ofds_nodes = gpd.GeoDataFrame(
-        gdf_nodes.drop(columns="geometry"), geometry=snapped_nodes
+        gdf_nodes.drop(columns="geometry").copy()
     )
+    gdf_ofds_nodes["geometry"] = snapped_nodes
+    gdf_ofds_nodes.set_geometry("geometry", inplace=True)
     return gdf_ofds_nodes, gdf_spans
 
 
@@ -189,7 +193,10 @@ def process_document_element(document, network_id, network_name, ignore_placemar
                             "links": [
                                 {
                                     "rel": "describedby",
-                                    "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                    "href": (
+                                        "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                        "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                    ),
                                 }
                             ],
                         },
@@ -208,7 +215,6 @@ def process_document_element(document, network_id, network_name, ignore_placemar
                     if re.search(rf"{ignore_pattern}", name):
                         is_ignored = True
                         break
-
                 if not is_ignored:
                     geojson_nodes.append(geojson_node)
 
@@ -218,6 +224,7 @@ def process_document_element(document, network_id, network_name, ignore_placemar
             )
             if multi_geometry is not None:
                 combined_coordinates = []
+                # Process LineString elements
                 for line_string in multi_geometry.iter(
                     "{http://www.opengis.net/kml/2.2}LineString"
                 ):
@@ -229,6 +236,49 @@ def process_document_element(document, network_id, network_name, ignore_placemar
                         for coord in coordinates_text.split()
                     ]
                     combined_coordinates.extend(coordinates)
+                # Process Point elements
+                for point_elem in multi_geometry.iter(
+                    "{http://www.opengis.net/kml/2.2}Point"
+                ):
+                    coordinates_text = point_elem.find(
+                        "{http://www.opengis.net/kml/2.2}coordinates"
+                    ).text
+                    coords = tuple(map(float, coordinates_text.split(",")[:2]))
+                    # Create GeoJSON node for this point
+                    node_id = str(uuid.uuid4())
+                    geojson_node = {
+                        "type": "Feature",
+                        "properties": {
+                            "name": name,
+                            "id": node_id,
+                            "network": {
+                                "id": network_id,
+                                "name": network_name,
+                                "links": [
+                                    {
+                                        "rel": "describedby",
+                                        "href": (
+                                            "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                            "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                        ),
+                                    }
+                                ],
+                            },
+                            "featureType": "node",
+                        },
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [coords[0], coords[1]],
+                        },
+                    }
+                    # If name does not match an element in the ignore_placemarks array, add the GeoJSON object to the list
+                    is_ignored = False
+                    for ignore_pattern in ignore_placemarks:
+                        if re.search(rf"{ignore_pattern}", name):
+                            is_ignored = True
+                            break
+                    if not is_ignored:
+                        geojson_nodes.append(geojson_node)
                 if len(combined_coordinates) >= 2:
                     shapely_line = LineString(combined_coordinates)
                     if shapely_line is not None:
@@ -244,7 +294,10 @@ def process_document_element(document, network_id, network_name, ignore_placemar
                                     "links": [
                                         {
                                             "rel": "describedby",
-                                            "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                            "href": (
+                                                "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                                "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                            ),
                                         }
                                     ],
                                 },
@@ -303,7 +356,10 @@ def process_document_element(document, network_id, network_name, ignore_placemar
                                     "links": [
                                         {
                                             "rel": "describedby",
-                                            "href": "https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-data-standard/0__3__0/schema/network-schema.json",
+                                            "href": (
+                                                "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                                "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                            ),
                                         }
                                     ],
                                 },
@@ -351,7 +407,7 @@ def snap_to_line(point, lines, tolerance=1e-4):
             nearest_point_on_line = point_on_line
 
     # If the snapped point is close to the start or end of the line, snap to that point within the tolerance
-    if nearest_line is not None:
+    if nearest_line is not None and nearest_point_on_line is not None:
         start_point = nearest_line.coords[0]
         end_point = nearest_line.coords[-1]
         start_buffer = Point(start_point).buffer(tolerance)
@@ -460,9 +516,10 @@ def break_spans_at_node_points(
         axis=1,
     )
 
-    gdf_intersects = gpd.GeoDataFrame(geometry=self_intersects, crs=gdf_spans.crs)
+    gdf_intersects = gpd.GeoDataFrame({"geometry": self_intersects})
+    gdf_intersects.set_crs(gdf_spans.crs, inplace=True)
     if not gdf_intersects.empty:
-        gdf_intersects.to_file("output/intersects.geojson", driver="GeoJSON")
+        gdf_intersects.to_file(Path("output/intersects.geojson"), driver="GeoJSON")
 
     return gdf_spans
 
@@ -472,8 +529,12 @@ def find_self_intersection(line):
     if not line.is_simple:
         intersection = unary_union(line)
         seg_coordinates = []
-        for seg in intersection.geoms:
-            seg_coordinates.extend(list(seg.coords))
+        # Only access .geoms if intersection is a GeometryCollection or MultiLineString
+        if isinstance(intersection, (GeometryCollection, MultiLineString)):
+            for seg in intersection.geoms:
+                seg_coordinates.extend(list(seg.coords))
+        else:
+            seg_coordinates.extend(list(intersection.coords))
         intersection = [Point(p) for p, c in Counter(seg_coordinates).items() if c > 1]
         intersection = MultiPoint(intersection)
     return intersection
@@ -566,7 +627,8 @@ def add_missing_nodes(
         # )
     else:
         combined_gdf_nodes = gdf_nodes
-        new_nodes_gdf = gpd.GeoDataFrame(columns=gdf_nodes.columns, crs=gdf_nodes.crs)  
+        new_nodes_gdf = gpd.GeoDataFrame({col: pd.Series(dtype=gdf_nodes[col].dtype) for col in gdf_nodes.columns})
+        new_nodes_gdf = new_nodes_gdf.set_crs(gdf_nodes.crs)
 
     return combined_gdf_nodes, new_nodes_gdf
 
@@ -919,9 +981,9 @@ def convert_to_serializable(obj):
         return {key: convert_to_serializable(value) for key, value in obj.items()}
     elif isinstance(obj, list):
         return [convert_to_serializable(element) for element in obj]
-    elif isinstance(obj, (np.int64, np.int32, np.int16)):
+    elif isinstance(obj, np.integer):
         return int(obj)
-    elif isinstance(obj, (np.float64, np.float32, np.float16)):
+    elif isinstance(obj, np.floating):
         return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
@@ -956,7 +1018,7 @@ def main(network_profile):
 
     if not network_prof["kml_file_name"]:
         print("Error. Please set kml file name in network profile")
-        sys: exit(1)
+        sys.exit(1)
     else:
         kml_file = network_prof["kml_file_name"]
 
@@ -1044,14 +1106,14 @@ def main(network_profile):
         kml_fullpath, network_id, network_name, ignore_placemarks
     )
 
-    min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_spans.geometry]).min()
     print(
         f"Breaking spans at node points. \nBefore: {len(gdf_spans)} spans, smallest span {min_vert}"
     )
     gdf_spans = break_spans_at_node_points(
         gdf_ofds_nodes, gdf_spans, network_name, network_id, network_links
     )
-    min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_spans.geometry]).min()
     print(f" After: {len(gdf_spans)} spans, smallest span {min_vert}\n")
 
     # Check for any spans that do not have a node at the start or end point and add as needed
@@ -1059,34 +1121,34 @@ def main(network_profile):
         gdf_spans, gdf_ofds_nodes, network_id, network_name, network_links
     )
     # Add information on the start and end nodes to the spans
-    min_vert = gdf_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_spans.geometry]).min()
     print(
         f"Adding nodes to spans. \nBefore: {len(gdf_spans)} spans, smallest span {min_vert}"
     )
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
-    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_ofds_spans.geometry]).min()
     print(f"\n After: {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
 
     # Merge nearby auto-generated nodes that are in close proximity to each other
-    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_ofds_spans.geometry]).min()
     print(
         f"Merging nearby autogen. \nBefore: {len(gdf_ofds_spans)} spans, smallest span {min_vert}"
     )
     gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_nodes(
         gdf_ofds_nodes, gdf_ofds_spans, 1e-1
     )
-    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_ofds_spans.geometry]).min()
     print(f" After: {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
 
     # Merge nearby auto-generated nodes that are in close proximity propoer nodes
-    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_ofds_spans.geometry]).min()
     print(
         f"Merging nearby autogen and proper nodes. \nBefore: {len(gdf_ofds_spans)} spans, smallest span {min_vert}"
     )
     gdf_ofds_spans, gdf_ofds_nodes = merge_nearby_auto_gen_and_proper_nodes(
         gdf_ofds_nodes, gdf_ofds_spans, 1e-3
     )
-    min_vert = gdf_ofds_spans.geometry.apply(lambda x: len(x.coords)).min()
+    min_vert = pd.Series([len(x.coords) for x in gdf_ofds_spans.geometry]).min()
     print(f" After: {len(gdf_ofds_spans)} spans, smallest span {min_vert}\n")
 
     # join_node_terminating_near_span(gdf_ofds_nodes,gdf_ofds_spans,1e-1)
