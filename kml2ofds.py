@@ -279,51 +279,67 @@ def process_document_element(document, network_id, network_name, ignore_placemar
                             break
                     if not is_ignored:
                         geojson_nodes.append(geojson_node)
-                if len(combined_coordinates) >= 2:
-                    shapely_line = LineString(combined_coordinates)
-                    if shapely_line is not None:
-                        # Convert Shapely LineString to GeoJSON
-                        geojson_span = {
-                            "type": "Feature",
-                            "properties": {
-                                "id": "",
-                                "name": name,
-                                "network": {
-                                    "id": network_id,
-                                    "name": network_name,
-                                    "links": [
-                                        {
-                                            "rel": "describedby",
-                                            "href": (
-                                                "https://raw.githubusercontent.com/Open-Telecoms-Data/"
-                                                "open-fibre-data-standard/0__3__0/schema/network-schema.json"
-                                            ),
-                                        }
+                # Add a flag to check if any LineString elements were found
+                found_linestring_in_multigeometry = False
+                for line_string in multi_geometry.iter(
+                    "{http://www.opengis.net/kml/2.2}LineString"
+                ):
+                    found_linestring_in_multigeometry = True
+                    coordinates_text = line_string.find(
+                        "{http://www.opengis.net/kml/2.2}coordinates"
+                    ).text
+                    coordinates = [
+                        tuple(map(float, coord.split(",")))
+                        for coord in coordinates_text.split()
+                    ]
+                    combined_coordinates.extend(coordinates)
+
+                if found_linestring_in_multigeometry:
+                    if len(combined_coordinates) >= 2:
+                        shapely_line = LineString(combined_coordinates)
+                        if shapely_line is not None:
+                            # Convert Shapely LineString to GeoJSON
+                            geojson_span = {
+                                "type": "Feature",
+                                "properties": {
+                                    "id": "",
+                                    "name": name,
+                                    "network": {
+                                        "id": network_id,
+                                        "name": network_name,
+                                        "links": [
+                                            {
+                                                "rel": "describedby",
+                                                "href": (
+                                                    "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                                    "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                                ),
+                                            }
+                                        ],
+                                    },
+                                    "featureType": "span",
+                                },
+                                "geometry": {
+                                    "type": "LineString",
+                                    "coordinates": [
+                                        (x, y) for x, y, *_ in shapely_line.coords
                                     ],
                                 },
-                                "featureType": "span",
-                            },
-                            "geometry": {
-                                "type": "LineString",
-                                "coordinates": [
-                                    (x, y) for x, y, *_ in shapely_line.coords
-                                ],
-                            },
-                        }
-                        # Check for duplicates before adding the GeoJSON object to the list
-                        is_span_duplicate = any(
-                            span["properties"]["name"] == name
-                            and span["geometry"]["coordinates"]
-                            == geojson_span["geometry"]["coordinates"]
-                            for span in geojson_spans
+                            }
+                            # Check for duplicates before adding the GeoJSON object to the list
+                            is_span_duplicate = any(
+                                span["properties"]["name"] == name
+                                and span["geometry"]["coordinates"]
+                                == geojson_span["geometry"]["coordinates"]
+                                for span in geojson_spans
+                            )
+                            # If not a duplicate, add the GeoJSON object to the list
+                            if not is_span_duplicate:
+                                geojson_spans.append(geojson_span)
+                    else:
+                        print(
+                            f"Warning: Skipping LineString with insufficient points in MultiGeometry: {name}"
                         )
-                        # If not a duplicate, add the GeoJSON object to the list
-                        if not is_span_duplicate:
-                            geojson_spans.append(geojson_span)
-                else:
-                    print(
-                        f"Warning: Skipping LineString with insufficient points in MultiGeometry: {name}"
-                    )
 
             elif (
                 placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
