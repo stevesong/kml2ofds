@@ -17,4 +17,6 @@ mtn_ghana_fob.profile
 Togo_Telecom.profile
 Liquid_DRC.profile
 Eletronet.profile
-requirements.bob 
+requirements.bob
+/settings.json
+.DS_Store
