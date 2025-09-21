@@ -27,7 +27,7 @@ from shapely.geometry import (
     GeometryCollection,
     MultiPoint,
 )
-from shapely.geometry import MultiLineString
+from shapely.geometry import MultiLineString, Point, LineString
 from shapely.ops import split, nearest_points, unary_union
 import geopandas as gpd
 import pandas as pd
@@ -37,7 +37,7 @@ from libcoveofds.schema import OFDSSchema
 from libcoveofds.jsonschemavalidate import JSONSchemaValidator
 from libcoveofds.python_validate import PythonValidate
 from pathlib import Path
-
+from typing import Optional
 # import matplotlib
 # matplotlib.use('Qt5Agg')  # Choose an appropriate backend
 # import matplotlib.pyplot as plt
@@ -104,14 +104,12 @@ def process_kml_file(filename, network_id, network_name, ignore_placemarks):
     with open("output/spans.geojson", "w") as f:
         json.dump({"type": "FeatureCollection", "features": geojson_spans}, f)
 
-    snapped_nodes = gdf_nodes.geometry.apply(
+    snapped_nodes = gdf_nodes.geometry.map(
         lambda point: snap_to_line(point, gdf_spans)
     )
 
     # Create a new GeoDataFrame with the snapped points and geojson features
-    gdf_ofds_nodes = gpd.GeoDataFrame(
-        gdf_nodes.drop(columns="geometry").copy()
-    )
+    gdf_ofds_nodes = gpd.GeoDataFrame(gdf_nodes.drop(columns="geometry").copy())
     gdf_ofds_nodes["geometry"] = snapped_nodes
     gdf_ofds_nodes.set_geometry("geometry", inplace=True)
     return gdf_ofds_nodes, gdf_spans
@@ -402,8 +400,7 @@ def process_document_element(document, network_id, network_name, ignore_placemar
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
 
-
-def snap_to_line(point, lines, tolerance=1e-4):
+def snap_to_line(point: Point, lines: gpd.GeoDataFrame, tolerance: float = 1e-4) -> Optional[Point]:
     """Find the nearest line to a given point and find the
     nearest point on that line to the given point.
     """
@@ -533,7 +530,7 @@ def break_spans_at_node_points(
     )
 
     gdf_intersects = gpd.GeoDataFrame({"geometry": self_intersects})
-    gdf_intersects.set_crs(gdf_spans.crs, inplace=True)
+    # gdf_intersects.set_crs(gdf_spans.crs, inplace=True)
     if not gdf_intersects.empty:
         gdf_intersects.to_file(Path("output/intersects.geojson"), driver="GeoJSON")
 
@@ -643,7 +640,9 @@ def add_missing_nodes(
         # )
     else:
         combined_gdf_nodes = gdf_nodes
-        new_nodes_gdf = gpd.GeoDataFrame({col: pd.Series(dtype=gdf_nodes[col].dtype) for col in gdf_nodes.columns})
+        new_nodes_gdf = gpd.GeoDataFrame(
+            {col: pd.Series(dtype=gdf_nodes[col].dtype) for col in gdf_nodes.columns}
+        )
         new_nodes_gdf = new_nodes_gdf.set_crs(gdf_nodes.crs)
 
     return combined_gdf_nodes, new_nodes_gdf
@@ -1016,10 +1015,10 @@ def convert_to_serializable(obj):
 )
 def main(network_profile):
     """Convert KML files to the Open Fibre Data Standard format.
-    
+
     This script takes a KML file and converts it to the Open Fibre Data Standard format,
     outputting both GeoJSON and JSON files for network nodes and spans.
-    
+
     The script requires a network profile configuration file that specifies:
     - KML file name
     - Network name and ID
@@ -1217,9 +1216,9 @@ if __name__ == "__main__":
     try:
         main()
     except click.exceptions.MissingParameter:
-        main(['--help'])
+        main(["--help"])
     except Exception as e:
         print(f"Unexpected error: {e}")
         import traceback
-        traceback.print_exc()
 
+        traceback.print_exc()

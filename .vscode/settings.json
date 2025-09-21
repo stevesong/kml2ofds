@@ -11,6 +11,8 @@
     "python.testing.pytestEnabled": true,
     "flake8.args": [
         "--max-line-length=120"
-     ]
+    ],
+    "cursorpyright.analysis.typeCheckingMode": "basic",
+    "CodeGPT.apiKey": "Anthropic"
 }
 
