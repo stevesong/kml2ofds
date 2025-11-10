@@ -18,6 +18,8 @@ In broad strokes the script:
 * where a span doesn't have a node at the start or end, a node is auto generated in order to comply with the OFDS standard;
 * adds meta data to the spans and nodes; at the moment only the most basic meta data is added during the export process
 * where two auto-generated nodes are found in close proximity, it is assumed that the spans they are connected to should be joined, the two nodes are merged and the end points of the spans connected to the merged node;
+* auto-generated nodes close to a proper node (within a defined threshold) are assumed to be the same point
+* auto-generated nodes close to a span (within a defined threshhold) are assumed to be a fork
 
 
 ## Install kml2ofds
