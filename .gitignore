@@ -11,12 +11,8 @@ kml2ofds-testing.qgz
 dist/
 .venv/
 .gitignore
-nofbi.profile
-mtn_zambia.profile
-mtn_ghana_fob.profile
-Togo_Telecom.profile
-Liquid_DRC.profile
-Eletronet.profile
+*.profile
 requirements.bob
 /settings.json
 .DS_Store
+conversion_testing.qgz
