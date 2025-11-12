@@ -299,10 +299,13 @@ def process_placemark(
     )
     if multi_geometry is not None:
         combined_coordinates = []
+        found_linestring_in_multigeometry = False
+        
         # Process LineString elements
         for line_string in multi_geometry.iter(
             "{http://www.opengis.net/kml/2.2}LineString"
         ):
+            found_linestring_in_multigeometry = True
             coordinates_text = line_string.find(
                 "{http://www.opengis.net/kml/2.2}coordinates"
             ).text
@@ -311,6 +314,7 @@ def process_placemark(
                 for coord in coordinates_text.split()
             ]
             combined_coordinates.extend(coordinates)
+        
         # Process Point elements
         for point_elem in multi_geometry.iter(
             "{http://www.opengis.net/kml/2.2}Point"
@@ -364,20 +368,6 @@ def process_placemark(
                     break
             if not is_ignored:
                 geojson_nodes.append(geojson_node)
-        # Add a flag to check if any LineString elements were found
-        found_linestring_in_multigeometry = False
-        for line_string in multi_geometry.iter(
-            "{http://www.opengis.net/kml/2.2}LineString"
-        ):
-            found_linestring_in_multigeometry = True
-            coordinates_text = line_string.find(
-                "{http://www.opengis.net/kml/2.2}coordinates"
-            ).text
-            coordinates = [
-                tuple(map(float, coord.split(",")))
-                for coord in coordinates_text.split()
-            ]
-            combined_coordinates.extend(coordinates)
 
         if found_linestring_in_multigeometry:
             if len(combined_coordinates) >= 2:
@@ -1649,7 +1639,6 @@ def main(network_profile):
         + date_string
         + ".geojson"
     )
-    # print(nodes_ofds_output)
 
     spans_ofds_output = (
         output_directory
