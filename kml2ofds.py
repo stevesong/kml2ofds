@@ -95,23 +95,77 @@ def process_kml_file(
     geojson_nodes = []
     geojson_spans = []
     # Start processing from the root Document
-    # First look for multiple Documents within the KML file.
-    for document in kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"):
-        document_name = document.findtext("{http://www.opengis.net/kml/2.2}name")
-        print(f"Processing Document: {document_name}")
+    # First look for Documents within the KML file.
+    # Find all Documents at any level
+    all_documents = list(kml_doc.iter("{http://www.opengis.net/kml/2.2}Document"))
+    
+    if all_documents:
+        # Track processed Documents to avoid double-processing nested Documents
+        processed_documents = set()
+        
+        # Process Documents (standard KML structure)
+        # Process in order, and skip nested Documents that are children of already-processed Documents
+        for document in all_documents:
+            # Check if this Document is nested inside another Document
+            # by checking if any of its ancestors is a Document
+            is_nested_in_document = False
+            parent = document.getparent()
+            while parent is not None and parent != kml_doc:
+                if parent.tag == "{http://www.opengis.net/kml/2.2}Document":
+                    is_nested_in_document = True
+                    break
+                parent = parent.getparent()
+            
+            if is_nested_in_document:
+                # This is a nested Document - it will be processed recursively by its parent
+                continue
+            
+            document_name = document.findtext("{http://www.opengis.net/kml/2.2}name")
+            print(f"Processing Document: {document_name}")
+            
+            processed_documents.add(document)
 
-        nodes, spans = process_document_element(
-            document,
-            network_id,
-            network_name,
-            ignore_placemarks,
-            physical_infrastructure_provider_id,
-            physical_infrastructure_provider_name,
-            network_providers_id,
-            network_providers_name,
-        )
-        geojson_nodes.extend(nodes)
-        geojson_spans.extend(spans)
+            nodes, spans = process_document_element(
+                document,
+                network_id,
+                network_name,
+                ignore_placemarks,
+                physical_infrastructure_provider_id,
+                physical_infrastructure_provider_name,
+                network_providers_id,
+                network_providers_name,
+            )
+            geojson_nodes.extend(nodes)
+            geojson_spans.extend(spans)
+    else:
+        # No Document found, look for Folders at root level
+        # Process top-level Folders (some KML files use Folders instead of Documents)
+        root_folders = [child for child in kml_doc if child.tag == "{http://www.opengis.net/kml/2.2}Folder"]
+        if not root_folders:
+            # If no root-level Folders, check if the root itself is a Folder
+            if kml_doc.tag == "{http://www.opengis.net/kml/2.2}Folder":
+                root_folders = [kml_doc]
+            else:
+                # Look for any Folders in the document
+                root_folders = list(kml_doc.iter("{http://www.opengis.net/kml/2.2}Folder"))
+        
+        for folder in root_folders:
+            folder_name = folder.findtext("{http://www.opengis.net/kml/2.2}name")
+            print(f"Processing Folder: {folder_name}")
+            
+            # Process this folder as if it were a Document
+            nodes, spans = process_document_element(
+                folder,
+                network_id,
+                network_name,
+                ignore_placemarks,
+                physical_infrastructure_provider_id,
+                physical_infrastructure_provider_name,
+                network_providers_id,
+                network_providers_name,
+            )
+            geojson_nodes.extend(nodes)
+            geojson_spans.extend(spans)
 
     print(f"Number of nodes found before deduplication: {len(geojson_nodes)}")
     geojson_nodes = remove_duplicate_nodes(geojson_nodes, 1)
@@ -158,6 +212,280 @@ def remove_duplicate_nodes(geojson_nodes, precision):
     return unique_nodes
 
 
+def process_placemark(
+    placemark,
+    network_id,
+    network_name,
+    ignore_placemarks,
+    physical_infrastructure_provider_id,
+    physical_infrastructure_provider_name,
+    network_providers_id,
+    network_providers_name,
+    geojson_nodes,
+    geojson_spans,
+):
+    """Process a single Placemark and add nodes/spans to the provided lists."""
+    # name = placemark.find('{http://www.opengis.net/kml/2.2}name').text
+    name_element = placemark.find("{http://www.opengis.net/kml/2.2}name")
+    name = name_element.text if name_element is not None else "Default Name"
+
+    # Check if placemark is a point
+    point_geometry = placemark.find("{http://www.opengis.net/kml/2.2}Point")
+    if point_geometry is not None:
+        # Convert KML Point to Shapely Point
+        shapely_point = Point(
+            float(
+                point_geometry.find(
+                    "{http://www.opengis.net/kml/2.2}coordinates"
+                ).text.split(",")[0]
+            ),
+            float(
+                point_geometry.find(
+                    "{http://www.opengis.net/kml/2.2}coordinates"
+                ).text.split(",")[1]
+            ),
+        )
+        # Convert Shapely Point to GeoJSON
+        node_id = str(uuid.uuid4())
+        geojson_node = {
+            "type": "Feature",
+            "properties": {
+                "name": name,
+                "id": node_id,
+                "network": {
+                    "id": network_id,
+                    "name": network_name,
+                    "links": [
+                        {
+                            "rel": "describedby",
+                            "href": (
+                                "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                            ),
+                        }
+                    ],
+                },
+                "physicalInfrastructureProvider": {
+                    "id": physical_infrastructure_provider_id,
+                    "name": physical_infrastructure_provider_name,
+                },
+                "networkProviders": [
+                    {
+                        "id": network_providers_id,
+                        "name": network_providers_name,
+                    }
+                ],
+                "featureType": "node",
+            },
+            "geometry": {
+                "type": "Point",
+                "coordinates": [shapely_point.x, shapely_point.y],
+            },
+        }
+
+        # If name does not match an element in the ignore_placemarks
+        # array, add the GeoJSON object to the list
+        is_ignored = False
+        for ignore_pattern in ignore_placemarks:
+            if re.search(rf"{ignore_pattern}", name):
+                is_ignored = True
+                break
+        if not is_ignored:
+            geojson_nodes.append(geojson_node)
+
+    # Look for MultiGeometry elements
+    multi_geometry = placemark.find(
+        "{http://www.opengis.net/kml/2.2}MultiGeometry"
+    )
+    if multi_geometry is not None:
+        combined_coordinates = []
+        # Process LineString elements
+        for line_string in multi_geometry.iter(
+            "{http://www.opengis.net/kml/2.2}LineString"
+        ):
+            coordinates_text = line_string.find(
+                "{http://www.opengis.net/kml/2.2}coordinates"
+            ).text
+            coordinates = [
+                tuple(map(float, coord.split(",")))
+                for coord in coordinates_text.split()
+            ]
+            combined_coordinates.extend(coordinates)
+        # Process Point elements
+        for point_elem in multi_geometry.iter(
+            "{http://www.opengis.net/kml/2.2}Point"
+        ):
+            coordinates_text = point_elem.find(
+                "{http://www.opengis.net/kml/2.2}coordinates"
+            ).text
+            coords = tuple(map(float, coordinates_text.split(",")[:2]))
+            # Create GeoJSON node for this point
+            node_id = str(uuid.uuid4())
+            geojson_node = {
+                "type": "Feature",
+                "properties": {
+                    "name": name,
+                    "id": node_id,
+                    "network": {
+                        "id": network_id,
+                        "name": network_name,
+                        "links": [
+                            {
+                                "rel": "describedby",
+                                "href": (
+                                    "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                    "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                ),
+                            }
+                        ],
+                    },
+                    "physicalInfrastructureProvider": {
+                        "id": physical_infrastructure_provider_id,
+                        "name": physical_infrastructure_provider_name,
+                    },
+                    "networkProviders": [
+                        {
+                            "id": network_providers_id,
+                            "name": network_providers_name,
+                        }
+                    ],
+                    "featureType": "node",
+                },
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [coords[0], coords[1]],
+                },
+            }
+            # If name does not match an element in the ignore_placemarks array, add the GeoJSON object to the list
+            is_ignored = False
+            for ignore_pattern in ignore_placemarks:
+                if re.search(rf"{ignore_pattern}", name):
+                    is_ignored = True
+                    break
+            if not is_ignored:
+                geojson_nodes.append(geojson_node)
+        # Add a flag to check if any LineString elements were found
+        found_linestring_in_multigeometry = False
+        for line_string in multi_geometry.iter(
+            "{http://www.opengis.net/kml/2.2}LineString"
+        ):
+            found_linestring_in_multigeometry = True
+            coordinates_text = line_string.find(
+                "{http://www.opengis.net/kml/2.2}coordinates"
+            ).text
+            coordinates = [
+                tuple(map(float, coord.split(",")))
+                for coord in coordinates_text.split()
+            ]
+            combined_coordinates.extend(coordinates)
+
+        if found_linestring_in_multigeometry:
+            if len(combined_coordinates) >= 2:
+                shapely_line = LineString(combined_coordinates)
+                if shapely_line is not None:
+                    # Convert Shapely LineString to GeoJSON
+                    geojson_span = {
+                        "type": "Feature",
+                        "properties": {
+                            "id": "",
+                            "name": name,
+                            "network": {
+                                "id": network_id,
+                                "name": network_name,
+                                "links": [
+                                    {
+                                        "rel": "describedby",
+                                        "href": (
+                                            "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                            "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                        ),
+                                    }
+                                ],
+                            },
+                            "featureType": "span",
+                        },
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [
+                                (x, y) for x, y, *_ in shapely_line.coords
+                            ],
+                        },
+                    }
+                    # Check for duplicates before adding the GeoJSON object to the list
+                    is_span_duplicate = any(
+                        span["properties"]["name"] == name
+                        and span["geometry"]["coordinates"]
+                        == geojson_span["geometry"]["coordinates"]
+                        for span in geojson_spans
+                    )
+                    # If not a duplicate, add the GeoJSON object to the list
+                    if not is_span_duplicate:
+                        geojson_spans.append(geojson_span)
+            else:
+                print(
+                    f"Warning: Skipping LineString with insufficient points in MultiGeometry: {name}"
+                )
+
+    elif (
+        placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
+    ):
+        # Look for LineStrings
+        polyline = placemark.find("{http://www.opengis.net/kml/2.2}LineString")
+        if polyline is not None:
+            coordinates_text = polyline.find(
+                "{http://www.opengis.net/kml/2.2}coordinates"
+            ).text
+            coordinates = [
+                tuple(map(float, coord.split(",")))
+                for coord in coordinates_text.split()
+            ]
+            # Convert to Shapely LineString
+            # ignore linestrings with only one point
+            shapely_line = None
+            if len(coordinates) >= 2:
+                shapely_line = LineString(coordinates)
+
+            if shapely_line is not None:
+                # Convert Shapely LineString to GeoJSON
+                geojson_span = {
+                    "type": "Feature",
+                    "properties": {
+                        "id": "",
+                        "name": name,
+                        "network": {
+                            "id": network_id,
+                            "name": network_name,
+                            "links": [
+                                {
+                                    "rel": "describedby",
+                                    "href": (
+                                        "https://raw.githubusercontent.com/Open-Telecoms-Data/"
+                                        "open-fibre-data-standard/0__3__0/schema/network-schema.json"
+                                    ),
+                                }
+                            ],
+                        },
+                        "featureType": "span",
+                    },
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            (x, y) for x, y, *_ in shapely_line.coords
+                        ],
+                    },
+                }
+                # Check for duplicates before adding the GeoJSON object to the list
+                is_span_duplicate = any(
+                    span["properties"]["name"] == name
+                    and span["geometry"]["coordinates"]
+                    == geojson_span["geometry"]["coordinates"]
+                    for span in geojson_spans
+                )
+                # If not a duplicate, add the GeoJSON object to the list
+                if not is_span_duplicate:
+                    geojson_spans.append(geojson_span)
+
+
 def process_document_element(
     document,
     network_id,
@@ -187,271 +515,59 @@ def process_document_element(
     geojson_nodes = []
     geojson_spans = []
 
+    # Process Placemarks directly in the Document (not in Folders)
+    for placemark in document.findall("{http://www.opengis.net/kml/2.2}Placemark"):
+        process_placemark(
+            placemark,
+            network_id,
+            network_name,
+            ignore_placemarks,
+            physical_infrastructure_provider_id,
+            physical_infrastructure_provider_name,
+            network_providers_id,
+            network_providers_name,
+            geojson_nodes,
+            geojson_spans,
+        )
+
     # Process Folders within the Document
     for folder in document.iter("{http://www.opengis.net/kml/2.2}Folder"):
         # print(f"Found folder: {folder.name.text}")
 
         # Process Placemarks within this Folder
         for placemark in folder.iter("{http://www.opengis.net/kml/2.2}Placemark"):
-
-            # name = placemark.find('{http://www.opengis.net/kml/2.2}name').text
-            name_element = placemark.find("{http://www.opengis.net/kml/2.2}name")
-            name = name_element.text if name_element is not None else "Default Name"
-
-            # Check if placemark is a point
-            point_geometry = placemark.find("{http://www.opengis.net/kml/2.2}Point")
-            if point_geometry is not None:
-                # Convert KML Point to Shapely Point
-                shapely_point = Point(
-                    float(
-                        point_geometry.find(
-                            "{http://www.opengis.net/kml/2.2}coordinates"
-                        ).text.split(",")[0]
-                    ),
-                    float(
-                        point_geometry.find(
-                            "{http://www.opengis.net/kml/2.2}coordinates"
-                        ).text.split(",")[1]
-                    ),
-                )
-                # Convert Shapely Point to GeoJSON
-                node_id = str(uuid.uuid4())
-                geojson_node = {
-                    "type": "Feature",
-                    "properties": {
-                        "name": name,
-                        "id": node_id,
-                        "network": {
-                            "id": network_id,
-                            "name": network_name,
-                            "links": [
-                                {
-                                    "rel": "describedby",
-                                    "href": (
-                                        "https://raw.githubusercontent.com/Open-Telecoms-Data/"
-                                        "open-fibre-data-standard/0__3__0/schema/network-schema.json"
-                                    ),
-                                }
-                            ],
-                        },
-                        "physicalInfrastructureProvider": {
-                            "id": physical_infrastructure_provider_id,
-                            "name": physical_infrastructure_provider_name,
-                        },
-                        "networkProviders": [
-                            {
-                                "id": network_providers_id,
-                                "name": network_providers_name,
-                            }
-                        ],
-                        "featureType": "node",
-                    },
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [shapely_point.x, shapely_point.y],
-                    },
-                }
-
-                # If name does not match an element in the ignore_placemarks
-                # array, add the GeoJSON object to the list
-                is_ignored = False
-                for ignore_pattern in ignore_placemarks:
-                    if re.search(rf"{ignore_pattern}", name):
-                        is_ignored = True
-                        break
-                if not is_ignored:
-                    geojson_nodes.append(geojson_node)
-
-            # Look for MultiGeometry elements
-            multi_geometry = placemark.find(
-                "{http://www.opengis.net/kml/2.2}MultiGeometry"
+            process_placemark(
+                placemark,
+                network_id,
+                network_name,
+                ignore_placemarks,
+                physical_infrastructure_provider_id,
+                physical_infrastructure_provider_name,
+                network_providers_id,
+                network_providers_name,
+                geojson_nodes,
+                geojson_spans,
             )
-            if multi_geometry is not None:
-                combined_coordinates = []
-                # Process LineString elements
-                for line_string in multi_geometry.iter(
-                    "{http://www.opengis.net/kml/2.2}LineString"
-                ):
-                    coordinates_text = line_string.find(
-                        "{http://www.opengis.net/kml/2.2}coordinates"
-                    ).text
-                    coordinates = [
-                        tuple(map(float, coord.split(",")))
-                        for coord in coordinates_text.split()
-                    ]
-                    combined_coordinates.extend(coordinates)
-                # Process Point elements
-                for point_elem in multi_geometry.iter(
-                    "{http://www.opengis.net/kml/2.2}Point"
-                ):
-                    coordinates_text = point_elem.find(
-                        "{http://www.opengis.net/kml/2.2}coordinates"
-                    ).text
-                    coords = tuple(map(float, coordinates_text.split(",")[:2]))
-                    # Create GeoJSON node for this point
-                    node_id = str(uuid.uuid4())
-                    geojson_node = {
-                        "type": "Feature",
-                        "properties": {
-                            "name": name,
-                            "id": node_id,
-                            "network": {
-                                "id": network_id,
-                                "name": network_name,
-                                "links": [
-                                    {
-                                        "rel": "describedby",
-                                        "href": (
-                                            "https://raw.githubusercontent.com/Open-Telecoms-Data/"
-                                            "open-fibre-data-standard/0__3__0/schema/network-schema.json"
-                                        ),
-                                    }
-                                ],
-                            },
-                            "physicalInfrastructureProvider": {
-                                "id": physical_infrastructure_provider_id,
-                                "name": physical_infrastructure_provider_name,
-                            },
-                            "networkProviders": [
-                                {
-                                    "id": network_providers_id,
-                                    "name": network_providers_name,
-                                }
-                            ],
-                            "featureType": "node",
-                        },
-                        "geometry": {
-                            "type": "Point",
-                            "coordinates": [coords[0], coords[1]],
-                        },
-                    }
-                    # If name does not match an element in the ignore_placemarks array, add the GeoJSON object to the list
-                    is_ignored = False
-                    for ignore_pattern in ignore_placemarks:
-                        if re.search(rf"{ignore_pattern}", name):
-                            is_ignored = True
-                            break
-                    if not is_ignored:
-                        geojson_nodes.append(geojson_node)
-                # Add a flag to check if any LineString elements were found
-                found_linestring_in_multigeometry = False
-                for line_string in multi_geometry.iter(
-                    "{http://www.opengis.net/kml/2.2}LineString"
-                ):
-                    found_linestring_in_multigeometry = True
-                    coordinates_text = line_string.find(
-                        "{http://www.opengis.net/kml/2.2}coordinates"
-                    ).text
-                    coordinates = [
-                        tuple(map(float, coord.split(",")))
-                        for coord in coordinates_text.split()
-                    ]
-                    combined_coordinates.extend(coordinates)
 
-                if found_linestring_in_multigeometry:
-                    if len(combined_coordinates) >= 2:
-                        shapely_line = LineString(combined_coordinates)
-                        if shapely_line is not None:
-                            # Convert Shapely LineString to GeoJSON
-                            geojson_span = {
-                                "type": "Feature",
-                                "properties": {
-                                    "id": "",
-                                    "name": name,
-                                    "network": {
-                                        "id": network_id,
-                                        "name": network_name,
-                                        "links": [
-                                            {
-                                                "rel": "describedby",
-                                                "href": (
-                                                    "https://raw.githubusercontent.com/Open-Telecoms-Data/"
-                                                    "open-fibre-data-standard/0__3__0/schema/network-schema.json"
-                                                ),
-                                            }
-                                        ],
-                                    },
-                                    "featureType": "span",
-                                },
-                                "geometry": {
-                                    "type": "LineString",
-                                    "coordinates": [
-                                        (x, y) for x, y, *_ in shapely_line.coords
-                                    ],
-                                },
-                            }
-                            # Check for duplicates before adding the GeoJSON object to the list
-                            is_span_duplicate = any(
-                                span["properties"]["name"] == name
-                                and span["geometry"]["coordinates"]
-                                == geojson_span["geometry"]["coordinates"]
-                                for span in geojson_spans
-                            )
-                            # If not a duplicate, add the GeoJSON object to the list
-                            if not is_span_duplicate:
-                                geojson_spans.append(geojson_span)
-                    else:
-                        print(
-                            f"Warning: Skipping LineString with insufficient points in MultiGeometry: {name}"
-                        )
-
-            elif (
-                placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
-            ):
-                # Look for LineStrings
-                polyline = placemark.find("{http://www.opengis.net/kml/2.2}LineString")
-                if polyline is not None:
-                    coordinates_text = polyline.find(
-                        "{http://www.opengis.net/kml/2.2}coordinates"
-                    ).text
-                    coordinates = [
-                        tuple(map(float, coord.split(",")))
-                        for coord in coordinates_text.split()
-                    ]
-                    # Convert to Shapely LineString
-                    # ignore linestrings with only one point
-                    if len(coordinates) >= 2:
-                        shapely_line = LineString(coordinates)
-
-                    if shapely_line is not None:
-                        # Convert Shapely LineString to GeoJSON
-                        geojson_span = {
-                            "type": "Feature",
-                            "properties": {
-                                "id": "",
-                                "name": name,
-                                "network": {
-                                    "id": network_id,
-                                    "name": network_name,
-                                    "links": [
-                                        {
-                                            "rel": "describedby",
-                                            "href": (
-                                                "https://raw.githubusercontent.com/Open-Telecoms-Data/"
-                                                "open-fibre-data-standard/0__3__0/schema/network-schema.json"
-                                            ),
-                                        }
-                                    ],
-                                },
-                                "featureType": "span",
-                            },
-                            "geometry": {
-                                "type": "LineString",
-                                "coordinates": [
-                                    (x, y) for x, y, *_ in shapely_line.coords
-                                ],
-                            },
-                        }
-                        # Check for duplicates before adding the GeoJSON object to the list
-                        is_span_duplicate = any(
-                            span["properties"]["name"] == name
-                            and span["geometry"]["coordinates"]
-                            == geojson_span["geometry"]["coordinates"]
-                            for span in geojson_spans
-                        )
-                        # If not a duplicate, add the GeoJSON object to the list
-                        if not is_span_duplicate:
-                            geojson_spans.append(geojson_span)
+    # Process nested Documents within this Document (recursive)
+    # Note: Top-level Documents are already processed by process_kml_file,
+    # but nested Documents need to be processed here
+    for nested_document in document.findall("{http://www.opengis.net/kml/2.2}Document"):
+        nested_document_name = nested_document.findtext("{http://www.opengis.net/kml/2.2}name")
+        print(f"Processing nested Document: {nested_document_name}")
+        
+        nested_nodes, nested_spans = process_document_element(
+            nested_document,
+            network_id,
+            network_name,
+            ignore_placemarks,
+            physical_infrastructure_provider_id,
+            physical_infrastructure_provider_name,
+            network_providers_id,
+            network_providers_name,
+        )
+        geojson_nodes.extend(nested_nodes)
+        geojson_spans.extend(nested_spans)
 
     # Return the list of GeoJSON objects
     return geojson_nodes, geojson_spans
@@ -491,6 +607,45 @@ def snap_to_line(
             nearest_point_on_line = Point(end_point)
 
     return nearest_point_on_line
+
+
+def filter_ignored_nodes(gdf_nodes, ignore_placemarks):
+    """
+    Filter out nodes that match any pattern in ignore_placemarks.
+
+    Args:
+        gdf_nodes (GeoDataFrame): GeoDataFrame containing the node points.
+        ignore_placemarks (list): List of placemark patterns to ignore.
+
+    Returns:
+        GeoDataFrame: GeoDataFrame with ignored nodes removed.
+    """
+    if not ignore_placemarks or len(ignore_placemarks) == 0:
+        return gdf_nodes
+
+    # Create a mask for nodes that should NOT be ignored
+    mask = pd.Series([True] * len(gdf_nodes), index=gdf_nodes.index)
+
+    for idx, row in gdf_nodes.iterrows():
+        name = row.get("name", "")
+        if name:
+            for ignore_pattern in ignore_placemarks:
+                if re.search(rf"{ignore_pattern}", name):
+                    mask[idx] = False
+                    break
+
+    return gdf_nodes[mask].copy()
+
+
+def extract_node_id(node_json_str):
+    """Extract node ID from JSON string."""
+    if node_json_str is None:
+        return None
+    try:
+        node_dict = json.loads(node_json_str) if isinstance(node_json_str, str) else node_json_str
+        return node_dict.get("id") if isinstance(node_dict, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def break_spans_at_node_points(
@@ -1410,6 +1565,7 @@ def main(network_profile):
         "input_directory": "input/",
         "output_directory": "output/",
         "output_name_prefix": "",
+        "threshold_meters": "5000",
     }
 
     # Extract all variables with defaults in one go
@@ -1445,15 +1601,6 @@ def main(network_profile):
     network_providers_id = network_prof.get(
         "networkProviders_id", defaults["networkProviders_id"]
     )
-    
-    # Debug: Print provider information values
-    print(f"\nDebug - Provider Information:")
-    print(f"  physical_infrastructure_provider_name: '{physical_infrastructure_provider_name}'")
-    print(f"  physical_infrastructure_provider_id: '{physical_infrastructure_provider_id}'")
-    print(f"  network_providers_name: '{network_providers_name}'")
-    print(f"  network_providers_id: '{network_providers_id}'")
-    print(f"  Available keys in network_prof: {list(network_prof.keys())}")
-
     # Handle ignore_placemarks (split by semicolon if present)
     ignore_placemarks_str = network_prof.get(
         "ignore_placemarks", defaults["ignore_placemarks"]
@@ -1461,6 +1608,14 @@ def main(network_profile):
     ignore_placemarks = (
         ignore_placemarks_str.split(";") if ignore_placemarks_str else []
     )
+
+    # Extract threshold_meters for consolidate_auto_generated_nodes
+    threshold_meters_str = network_prof.get("threshold_meters", defaults["threshold_meters"])
+    try:
+        threshold_meters = float(threshold_meters_str)
+    except (ValueError, TypeError):
+        print(f"Warning: Invalid threshold_meters value '{threshold_meters_str}'. Using default 5000.")
+        threshold_meters = 5000.0
 
     # Extract directory settings
     input_directory = network_prof.get("input_directory", defaults["input_directory"])
@@ -1525,8 +1680,11 @@ def main(network_profile):
         f"Breaking spans at node points. \nBefore: {len(gdf_spans)} spans, "
         f"{len(gdf_ofds_nodes)} nodes, min vertices: {min_vert}"
     )
+    # Filter out ignored nodes before breaking spans
+    gdf_nodes_for_breaking = filter_ignored_nodes(gdf_ofds_nodes, ignore_placemarks)
+    print(f"Filtered out ignored nodes: {len(gdf_ofds_nodes)} -> {len(gdf_nodes_for_breaking)} nodes")
     gdf_spans = break_spans_at_node_points(
-        gdf_ofds_nodes, gdf_spans, network_name, network_id, network_links
+        gdf_nodes_for_breaking, gdf_spans, network_name, network_id, network_links
     )
     min_vert = pd.Series([len(x.coords) for x in gdf_spans.geometry]).min()
     print(
@@ -1559,6 +1717,18 @@ def main(network_profile):
         f"{len(gdf_ofds_nodes)} nodes, min vertices: {min_vert}"
     )
     gdf_ofds_spans = add_nodes_to_spans(gdf_spans, gdf_ofds_nodes)
+
+    # Filter out spans with identical start and end nodes
+    spans_before_filter = len(gdf_ofds_spans)
+    start_ids = gdf_ofds_spans["start"].apply(extract_node_id)
+    end_ids = gdf_ofds_spans["end"].apply(extract_node_id)
+    # Keep spans where start and end IDs are different, or where either is None
+    valid_mask = (start_ids != end_ids) | (start_ids.isna()) | (end_ids.isna())
+    gdf_ofds_spans = gdf_ofds_spans[valid_mask].copy()
+    spans_removed = spans_before_filter - len(gdf_ofds_spans)
+    if spans_removed > 0:
+        print(f"Removed {spans_removed} spans with identical start and end nodes")
+
     min_vert = pd.Series([len(x.coords) for x in gdf_ofds_spans.geometry]).min()
     print(
         f" After: {len(gdf_ofds_spans)} spans, "
@@ -1573,9 +1743,9 @@ def main(network_profile):
         f"Consolidating auto-generated nodes. \nBefore: {spans_before} spans, "
         f"{nodes_before} nodes, min vertices: {min_vert}"
     )
-    # Threshold: 111 meters (equivalent to 1e-3 degrees)
+    # Use threshold_meters from profile (default: 5000 meters)
     gdf_ofds_spans, gdf_ofds_nodes = consolidate_auto_generated_nodes(
-        gdf_ofds_nodes, gdf_ofds_spans, 5000
+        gdf_ofds_nodes, gdf_ofds_spans, threshold_meters
     )
     spans_after = len(gdf_ofds_spans)
     nodes_after = len(gdf_ofds_nodes)
@@ -1585,6 +1755,16 @@ def main(network_profile):
         f"{nodes_after} nodes ({nodes_before - nodes_after} removed), "
         f"min vertices: {min_vert}\n"
     )
+
+    # Filter out any spans with identical start and end nodes after consolidation
+    spans_before_final_filter = len(gdf_ofds_spans)
+    start_ids = gdf_ofds_spans["start"].apply(extract_node_id)
+    end_ids = gdf_ofds_spans["end"].apply(extract_node_id)
+    valid_mask = (start_ids != end_ids) | (start_ids.isna()) | (end_ids.isna())
+    gdf_ofds_spans = gdf_ofds_spans[valid_mask].copy()
+    spans_removed_final = spans_before_final_filter - len(gdf_ofds_spans)
+    if spans_removed_final > 0:
+        print(f"Removed {spans_removed_final} additional spans with identical start and end nodes after consolidation")
 
     # join_node_terminating_near_span(gdf_ofds_nodes,gdf_ofds_spans,1e-1)
 
