@@ -1060,62 +1060,202 @@ def consolidate_auto_generated_nodes(gdf_ofds_nodes, gdf_ofds_spans, threshold_m
 
     print("-" * 80)
 
-    # Phase 3: Merge Auto-Generated Nodes with Each Other
+    # Phase 3: Join spans connected to close auto-generated nodes
+    # When two auto-generated nodes are within threshold, remove both nodes
+    # and join the spans that were connected to them into a single span
     filtered_nodes = auto_gen_nodes.copy()
     coordinates = np.array([(point.x, point.y) for point in filtered_nodes.geometry])
 
     if len(coordinates) > 0:
         tree = KDTree(coordinates)
-        close_pairs_indices = [
+        # Find clusters of nodes within threshold
+        close_clusters = [
             indices
             for indices in tree.query_radius(coordinates, r=threshold)
-            if len(indices) > 1
+            if len(indices) == 2  # Only process clusters with exactly 2 nodes
         ]
 
-        close_pairs_indices = [
-            (i, j)
-            for sublist in close_pairs_indices
-            for i in sublist
-            for j in sublist
-            if i != j
+        # Convert clusters to pairs (each cluster of 2 nodes becomes one pair)
+        unique_pairs = [
+            (min(cluster[0], cluster[1]), max(cluster[0], cluster[1]))
+            for cluster in close_clusters
         ]
-        unique_pairs = list(set((min(i, j), max(i, j)) for i, j in close_pairs_indices))
+        # Remove duplicate pairs
+        unique_pairs = list(set(unique_pairs))
 
-        merged_node_ids = []
-        for index, span in gdf_ofds_spans.iterrows():
-            start_dict = json.loads(span["start"])
-            end_dict = json.loads(span["end"])
+        nodes_to_remove = set()
+        spans_to_remove = []
+        new_spans = []
 
-            for pair in unique_pairs:
-                if start_dict["id"] == filtered_nodes.iloc[pair[1]]["id"]:
-                    start_dict["id"] = filtered_nodes.iloc[pair[0]]["id"]
-                    merged_node_ids.append(filtered_nodes.iloc[pair[1]]["id"])
-                    new_node_geometry = filtered_nodes.iloc[pair[0]]["geometry"]
-                    span_geometry = span["geometry"]
-                    updated_coords = list(span_geometry.coords)
-                    updated_coords[0] = (new_node_geometry.x, new_node_geometry.y)
-                    span_geometry = LineString(updated_coords)
-                    gdf_ofds_spans.at[index, "geometry"] = span_geometry
-                elif end_dict["id"] == filtered_nodes.iloc[pair[1]]["id"]:
-                    end_dict["id"] = filtered_nodes.iloc[pair[0]]["id"]
-                    merged_node_ids.append(filtered_nodes.iloc[pair[1]]["id"])
-                    new_node_geometry = filtered_nodes.iloc[pair[0]]["geometry"]
-                    span_geometry = span["geometry"]
-                    updated_coords = list(span_geometry.coords)
-                    updated_coords[-1] = (new_node_geometry.x, new_node_geometry.y)
-                    span_geometry = LineString(updated_coords)
-                    gdf_ofds_spans.at[index, "geometry"] = span_geometry
+        for pair in unique_pairs:
+            node_a_idx = pair[0]
+            node_b_idx = pair[1]
+            node_a_id = filtered_nodes.iloc[node_a_idx]["id"]
+            node_b_id = filtered_nodes.iloc[node_b_idx]["id"]
 
-            start_json = json.dumps(convert_to_serializable(start_dict))
-            end_json = json.dumps(convert_to_serializable(end_dict))
-            gdf_ofds_spans.at[index, "start"] = start_json
-            gdf_ofds_spans.at[index, "end"] = end_json
+            # Find all spans connected to Node A
+            spans_connected_to_a = []
+            spans_connected_to_b = []
 
-        gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes["id"].isin(merged_node_ids)]
-        print(
-            f"Phase 3: Merged {len(set(merged_node_ids))} auto-generated nodes "
-            f"with each other. Remaining nodes: {len(gdf_ofds_nodes)}"
-        )
+            for span_idx, span_row in gdf_ofds_spans.iterrows():
+                start_dict = json.loads(span_row["start"])
+                end_dict = json.loads(span_row["end"])
+                start_id = start_dict.get("id") if start_dict else None
+                end_id = end_dict.get("id") if end_dict else None
+
+                # Check if span is connected to Node A
+                if start_id == node_a_id or end_id == node_a_id:
+                    spans_connected_to_a.append((span_idx, span_row, start_id == node_a_id))
+
+                # Check if span is connected to Node B
+                if start_id == node_b_id or end_id == node_b_id:
+                    spans_connected_to_b.append((span_idx, span_row, start_id == node_b_id))
+
+            # Join spans: combine all spans connected to Node A and Node B
+            # Deduplicate spans (a span connecting A to B will appear in both lists)
+            unique_connected_spans = {}
+            for span_idx, span_row, is_start_a in spans_connected_to_a:
+                if span_idx not in unique_connected_spans:
+                    unique_connected_spans[span_idx] = (span_row, is_start_a, False)
+            for span_idx, span_row, is_start_b in spans_connected_to_b:
+                if span_idx not in unique_connected_spans:
+                    unique_connected_spans[span_idx] = (span_row, False, is_start_b)
+                else:
+                    # Span connects both nodes - mark it
+                    unique_connected_spans[span_idx] = (span_row, True, True)
+
+            if len(unique_connected_spans) >= 2:
+                # Collect all LineString geometries to join
+                # Track which nodes correspond to the start and end of each geometry
+                geometries_to_join = []
+                geometry_start_nodes = []  # Node at the start of each geometry
+                geometry_end_nodes = []    # Node at the end of each geometry
+
+                for span_idx, (span_row, connects_to_a, connects_to_b) in unique_connected_spans.items():
+                    span_geom = span_row["geometry"]
+                    start_dict = json.loads(span_row["start"])
+                    end_dict = json.loads(span_row["end"])
+                    start_id = start_dict.get("id") if start_dict else None
+                    end_id = end_dict.get("id") if end_dict else None
+
+                    # Check if span connects both nodes (A to B or B to A)
+                    connects_both = (
+                        (start_id == node_a_id and end_id == node_b_id) or
+                        (start_id == node_b_id and end_id == node_a_id)
+                    )
+
+                    if connects_both:
+                        # Span connects both nodes - include it as-is
+                        # This span will be in the middle, so we don't track its nodes
+                        geometries_to_join.append(span_geom)
+                        geometry_start_nodes.append(None)
+                        geometry_end_nodes.append(None)
+                    elif start_id == node_a_id or start_id == node_b_id:
+                        # Node A or B is at start, so other end (end_dict) is at the end
+                        # Reverse geometry so it goes from other end toward the removed node
+                        reversed_geom = LineString(list(span_geom.coords)[::-1])
+                        geometries_to_join.append(reversed_geom)
+                        # The "other end" node (end_dict) is at the END of the reversed geometry
+                        geometry_start_nodes.append(None)
+                        geometry_end_nodes.append(end_dict)
+                    else:
+                        # Node A or B is at end, so other end (start_dict) is at the start
+                        # Keep geometry as is (goes from start toward the removed node)
+                        geometries_to_join.append(span_geom)
+                        # The "other end" node (start_dict) is at the START of the geometry
+                        geometry_start_nodes.append(start_dict)
+                        geometry_end_nodes.append(None)
+
+                    # Mark span for removal
+                    if span_idx not in spans_to_remove:
+                        spans_to_remove.append(span_idx)
+
+                # Join all geometries into a single LineString
+                if geometries_to_join:
+                    # Concatenate coordinates from all LineStrings
+                    joined_coords = []
+                    for geom in geometries_to_join:
+                        joined_coords.extend(list(geom.coords))
+
+                    # Remove duplicate consecutive coordinates
+                    cleaned_coords = [joined_coords[0]]
+                    for coord in joined_coords[1:]:
+                        if coord != cleaned_coords[-1]:
+                            cleaned_coords.append(coord)
+
+                    if len(cleaned_coords) >= 2:
+                        joined_geometry = LineString(cleaned_coords)
+
+                        # Determine start and end nodes for the joined span
+                        # The start node is the "other end" node from the first geometry
+                        # The end node is the "other end" node from the last geometry
+                        new_start_node = None
+                        new_end_node = None
+                        
+                        # Find the first "other end" node (from start_nodes or end_nodes of first geometry)
+                        if geometry_start_nodes and geometry_start_nodes[0] is not None:
+                            new_start_node = geometry_start_nodes[0]
+                        elif geometry_end_nodes and geometry_end_nodes[0] is not None:
+                            new_start_node = geometry_end_nodes[0]
+                        
+                        # Find the last "other end" node (from start_nodes or end_nodes of last geometry)
+                        if geometry_end_nodes and geometry_end_nodes[-1] is not None:
+                            new_end_node = geometry_end_nodes[-1]
+                        elif geometry_start_nodes and geometry_start_nodes[-1] is not None:
+                            new_end_node = geometry_start_nodes[-1]
+                        
+                        # Fallback: collect all valid nodes and use first/last
+                        all_valid_nodes = [
+                            n for n in geometry_start_nodes + geometry_end_nodes if n is not None
+                        ]
+                        if new_start_node is None and all_valid_nodes:
+                            new_start_node = all_valid_nodes[0]
+                        if new_end_node is None and all_valid_nodes:
+                            if len(all_valid_nodes) > 1:
+                                new_end_node = all_valid_nodes[-1]
+                            else:
+                                new_end_node = all_valid_nodes[0]
+
+                        # Create new span
+                        new_span = span_row.copy()
+                        new_span["id"] = str(uuid.uuid4())
+                        new_span["geometry"] = joined_geometry
+                        if new_start_node:
+                            new_span["start"] = json.dumps(
+                                convert_to_serializable(new_start_node)
+                            )
+                        else:
+                            new_span["start"] = None
+                        if new_end_node:
+                            new_span["end"] = json.dumps(
+                                convert_to_serializable(new_end_node)
+                            )
+                        else:
+                            new_span["end"] = None
+
+                        new_spans.append(new_span)
+
+            # Mark both nodes for removal
+            nodes_to_remove.add(node_a_id)
+            nodes_to_remove.add(node_b_id)
+
+        # Remove old spans and add new joined spans
+        if spans_to_remove:
+            gdf_ofds_spans = gdf_ofds_spans.drop(index=spans_to_remove)
+            if new_spans:
+                new_spans_gdf = gpd.GeoDataFrame(new_spans, crs=gdf_ofds_spans.crs)
+                gdf_ofds_spans = pd.concat(
+                    [gdf_ofds_spans, new_spans_gdf], ignore_index=True
+                )
+
+        # Remove the nodes
+        if nodes_to_remove:
+            gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes["id"].isin(nodes_to_remove)]
+            print(
+                f"Phase 3: Removed {len(nodes_to_remove)} auto-generated nodes and "
+                f"joined {len(spans_to_remove)} spans into {len(new_spans)} spans. "
+                f"Remaining nodes: {len(gdf_ofds_nodes)}"
+            )
 
     # Phase 4: Merge Auto-Generated Nodes with Proper Nodes
     coordinates = np.array([(point.x, point.y) for point in gdf_ofds_nodes.geometry])
