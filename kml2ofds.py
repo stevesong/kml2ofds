@@ -298,24 +298,7 @@ def process_placemark(
         "{http://www.opengis.net/kml/2.2}MultiGeometry"
     )
     if multi_geometry is not None:
-        combined_coordinates = []
-        found_linestring_in_multigeometry = False
-        
-        # Process LineString elements
-        for line_string in multi_geometry.iter(
-            "{http://www.opengis.net/kml/2.2}LineString"
-        ):
-            found_linestring_in_multigeometry = True
-            coordinates_text = line_string.find(
-                "{http://www.opengis.net/kml/2.2}coordinates"
-            ).text
-            coordinates = [
-                tuple(map(float, coord.split(",")))
-                for coord in coordinates_text.split()
-            ]
-            combined_coordinates.extend(coordinates)
-        
-        # Process Point elements
+        # Process Point elements first
         for point_elem in multi_geometry.iter(
             "{http://www.opengis.net/kml/2.2}Point"
         ):
@@ -369,9 +352,21 @@ def process_placemark(
             if not is_ignored:
                 geojson_nodes.append(geojson_node)
 
-        if found_linestring_in_multigeometry:
-            if len(combined_coordinates) >= 2:
-                shapely_line = LineString(combined_coordinates)
+        # Process LineString elements - create a separate span for each LineString
+        for line_string in multi_geometry.iter(
+            "{http://www.opengis.net/kml/2.2}LineString"
+        ):
+            coordinates_text = line_string.find(
+                "{http://www.opengis.net/kml/2.2}coordinates"
+            ).text
+            coordinates = [
+                tuple(map(float, coord.split(",")))
+                for coord in coordinates_text.split()
+            ]
+
+            # Create a separate span for each LineString
+            if len(coordinates) >= 2:
+                shapely_line = LineString(coordinates)
                 if shapely_line is not None:
                     # Convert Shapely LineString to GeoJSON
                     geojson_span = {
@@ -411,10 +406,6 @@ def process_placemark(
                     # If not a duplicate, add the GeoJSON object to the list
                     if not is_span_duplicate:
                         geojson_spans.append(geojson_span)
-            else:
-                print(
-                    f"Warning: Skipping LineString with insufficient points in MultiGeometry: {name}"
-                )
 
     elif (
         placemark.find("{http://www.opengis.net/kml/2.2}LineString") is not None
