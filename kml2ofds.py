@@ -797,6 +797,174 @@ def rejoin_self_intersection_breaks(split_lines, intersect_points):
     return geometry_collection
 
 
+def merge_contiguous_spans(gdf_spans, precision=6):
+    """
+    Merge spans that have matching endpoints (within specified precision).
+    
+    This function finds spans where:
+    - One span's start vertex matches another span's end vertex (or vice versa)
+    - Coordinates match within the specified decimal precision
+    
+    Iteratively merges spans until no more merges are possible (handles chains).
+    
+    Args:
+        gdf_spans (GeoDataFrame): GeoDataFrame containing spans to merge
+        precision (int): Number of decimal places for coordinate matching (default: 6)
+    
+    Returns:
+        GeoDataFrame: GeoDataFrame with merged spans
+    """
+    if len(gdf_spans) == 0:
+        return gdf_spans
+    
+    # Helper function to round coordinates to specified precision
+    def round_coord(coord):
+        return (round(coord[0], precision), round(coord[1], precision))
+    
+    # Iterate until no more merges are possible
+    current_spans = gdf_spans.copy()
+    max_iterations = 100  # Safety limit
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
+        spans_to_process = current_spans.copy()
+        merged_spans = []
+        processed = set()
+        
+        # Build endpoint map for current iteration
+        endpoint_map = {}
+        for idx, row in spans_to_process.iterrows():
+            start_coord = round_coord(row.geometry.coords[0])
+            end_coord = round_coord(row.geometry.coords[-1])
+            
+            if start_coord not in endpoint_map:
+                endpoint_map[start_coord] = []
+            endpoint_map[start_coord].append((idx, True))
+            
+            if end_coord not in endpoint_map:
+                endpoint_map[end_coord] = []
+            endpoint_map[end_coord].append((idx, False))
+        
+        merges_found = False
+        
+        # Process spans to find matches and merge
+        # Continue extending each span in both directions until no more connections found
+        for idx, row in spans_to_process.iterrows():
+            if idx in processed:
+                continue
+            
+            merged_span = row.copy()
+            merged_coords = list(row.geometry.coords)
+            
+            # Keep extending this span in both directions until no more connections
+            extended = True
+            while extended:
+                extended = False
+                start_coord = round_coord(merged_coords[0])
+                end_coord = round_coord(merged_coords[-1])
+                
+                # Try to extend at the start (find spans that end at this start)
+                if start_coord in endpoint_map:
+                    # Create a copy of the list to iterate over (since we'll modify it)
+                    candidates = endpoint_map[start_coord][:]
+                    for other_idx, is_other_start in candidates:
+                        if other_idx == idx or other_idx in processed:
+                            continue
+                        
+                        other_row = spans_to_process.loc[other_idx]
+                        other_start_coord = round_coord(other_row.geometry.coords[0])
+                        other_end_coord = round_coord(other_row.geometry.coords[-1])
+                        
+                        # Check if other span's end matches this span's start
+                        if not is_other_start and other_end_coord == start_coord:
+                            other_coords = list(other_row.geometry.coords)
+                            # Use rounded coordinates for comparison to handle floating point precision
+                            other_end_rounded = round_coord(other_coords[-1])
+                            merged_start_rounded = round_coord(merged_coords[0])
+                            
+                            # Remove duplicate point at junction
+                            if other_end_rounded == merged_start_rounded:
+                                merged_coords = other_coords[:-1] + merged_coords
+                            else:
+                                merged_coords = other_coords + merged_coords
+                            extended = True
+                            processed.add(other_idx)
+                            merges_found = True
+                            
+                            # Remove old endpoints from map and add new ones
+                            old_start = other_start_coord
+                            old_end = other_end_coord
+                            if old_start in endpoint_map:
+                                endpoint_map[old_start] = [(i, s) for i, s in endpoint_map[old_start] if i != other_idx]
+                            if old_end in endpoint_map:
+                                endpoint_map[old_end] = [(i, s) for i, s in endpoint_map[old_end] if i != other_idx]
+                            
+                            # Update endpoint map for new start coordinate
+                            new_start_coord = round_coord(merged_coords[0])
+                            if new_start_coord not in endpoint_map:
+                                endpoint_map[new_start_coord] = []
+                            break
+                
+                # Try to extend at the end (find spans that start at this end)
+                if end_coord in endpoint_map:
+                    # Create a copy of the list to iterate over (since we'll modify it)
+                    candidates = endpoint_map[end_coord][:]
+                    for other_idx, is_other_start in candidates:
+                        if other_idx == idx or other_idx in processed:
+                            continue
+                        
+                        other_row = spans_to_process.loc[other_idx]
+                        other_start_coord = round_coord(other_row.geometry.coords[0])
+                        other_end_coord = round_coord(other_row.geometry.coords[-1])
+                        
+                        # Check if other span's start matches this span's end
+                        if is_other_start and other_start_coord == end_coord:
+                            other_coords = list(other_row.geometry.coords)
+                            # Use rounded coordinates for comparison to handle floating point precision
+                            merged_end_rounded = round_coord(merged_coords[-1])
+                            other_start_rounded = round_coord(other_coords[0])
+                            
+                            # Remove duplicate point at junction
+                            if merged_end_rounded == other_start_rounded:
+                                merged_coords = merged_coords + other_coords[1:]
+                            else:
+                                merged_coords = merged_coords + other_coords
+                            extended = True
+                            processed.add(other_idx)
+                            merges_found = True
+                            
+                            # Remove old endpoints from map and add new ones
+                            old_start = other_start_coord
+                            old_end = other_end_coord
+                            if old_start in endpoint_map:
+                                endpoint_map[old_start] = [(i, s) for i, s in endpoint_map[old_start] if i != other_idx]
+                            if old_end in endpoint_map:
+                                endpoint_map[old_end] = [(i, s) for i, s in endpoint_map[old_end] if i != other_idx]
+                            
+                            # Update endpoint map for new end coordinate
+                            new_end_coord = round_coord(merged_coords[-1])
+                            if new_end_coord not in endpoint_map:
+                                endpoint_map[new_end_coord] = []
+                            break
+            
+            # Update geometry
+            if len(merged_coords) >= 2:
+                merged_span["geometry"] = LineString(merged_coords)
+            
+            merged_spans.append(merged_span)
+            processed.add(idx)
+        
+        # If no merges found, we're done
+        if not merges_found:
+            break
+        
+        # Create new GeoDataFrame for next iteration
+        current_spans = gpd.GeoDataFrame(merged_spans, crs=spans_to_process.crs)
+    
+    return current_spans
+
+
 def add_missing_nodes(
     gdf_spans,
     gdf_nodes,
@@ -807,11 +975,13 @@ def add_missing_nodes(
     physical_infrastructure_provider_name,
     network_providers_id,
     network_providers_name,
-    tolerance=1e-6,
+    tolerance=1e-3,  # Increased to match find_end_point tolerance
 ):
     # Ensure that each segment has a start and end node
     # If not, add the missing nodes to the ofds_points_gdf
     new_nodes = []  # Store new nodes to be appended to the ofds_points_gdf
+    new_nodes_geoms = []  # Store geometries for proximity checking
+    
     for _, row in gdf_spans.iterrows():
         start_point = row.geometry.coords[0]
         end_point = row.geometry.coords[-1]
@@ -826,31 +996,50 @@ def add_missing_nodes(
 
         # Add points if they don't exist
         if not start_exists:
-            new_node = append_node(
-                start_point,
-                network_id,
-                network_name,
-                network_links,
-                physical_infrastructure_provider_id,
-                physical_infrastructure_provider_name,
-                network_providers_id,
-                network_providers_name,
-            )
-            if not any(new_node["geometry"] == node["geometry"] for node in new_nodes):
+            start_point_geom = Point(start_point)
+            # Check if we've already created a node nearby (within tolerance)
+            nearby_exists = False
+            for existing_geom in new_nodes_geoms:
+                if start_point_geom.distance(existing_geom) <= tolerance:
+                    nearby_exists = True
+                    break
+            
+            if not nearby_exists:
+                new_node = append_node(
+                    start_point,
+                    network_id,
+                    network_name,
+                    network_links,
+                    physical_infrastructure_provider_id,
+                    physical_infrastructure_provider_name,
+                    network_providers_id,
+                    network_providers_name,
+                )
                 new_nodes.append(new_node)
+                new_nodes_geoms.append(start_point_geom)
+                
         if not end_exists:
-            new_node = append_node(
-                end_point,
-                network_id,
-                network_name,
-                network_links,
-                physical_infrastructure_provider_id,
-                physical_infrastructure_provider_name,
-                network_providers_id,
-                network_providers_name,
-            )
-            if not any(new_node["geometry"] == node["geometry"] for node in new_nodes):
+            end_point_geom = Point(end_point)
+            # Check if we've already created a node nearby (within tolerance)
+            nearby_exists = False
+            for existing_geom in new_nodes_geoms:
+                if end_point_geom.distance(existing_geom) <= tolerance:
+                    nearby_exists = True
+                    break
+            
+            if not nearby_exists:
+                new_node = append_node(
+                    end_point,
+                    network_id,
+                    network_name,
+                    network_links,
+                    physical_infrastructure_provider_id,
+                    physical_infrastructure_provider_name,
+                    network_providers_id,
+                    network_providers_name,
+                )
                 new_nodes.append(new_node)
+                new_nodes_geoms.append(end_point_geom)
 
     # Convert the list of new nodes into a GeoDataFrame
     if new_nodes:
@@ -952,6 +1141,11 @@ def write_debug_geojson(gdf_nodes, gdf_spans, output_dir, phase_name, output_pre
     """
     from pathlib import Path
     
+    # Check if output_dir is provided
+    if output_dir is None:
+        print(f"  [DEBUG] Warning: debug_output_dir is None, skipping debug file write for {phase_name}")
+        return
+    
     # Ensure output directory exists
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -980,6 +1174,7 @@ def consolidate_auto_generated_nodes(
     debug_enabled=False,
     debug_output_dir=None,
     debug_output_prefix="",
+    rename_spans_from_nodes=False,
 ):
     """
     Consolidated function that analyzes, merges, and splits spans at auto-generated nodes.
@@ -989,6 +1184,7 @@ def consolidate_auto_generated_nodes(
     2. Merges auto-generated nodes that are close to each other
     3. Merges auto-generated nodes that are close to proper nodes
     4. Moves and splits spans at auto-generated endpoint nodes to create fork points
+    5. Optionally renames spans based on start and end node names
 
     Args:
         gdf_ofds_nodes (GeoDataFrame): GeoDataFrame containing the node points.
@@ -997,11 +1193,17 @@ def consolidate_auto_generated_nodes(
         debug_enabled (bool): If True, write debug GeoJSON files after each phase.
         debug_output_dir (str): Output directory for debug files.
         debug_output_prefix (str): Prefix for debug filenames.
+        rename_spans_from_nodes (bool): If True, rename spans to "start node name - end node name".
 
     Returns:
         tuple: (gdf_ofds_spans, gdf_ofds_nodes) - Updated spans and nodes GeoDataFrames.
     """
-    # Phase 1: Initial Analysis and Setup
+    # Validate debug configuration
+    if debug_enabled and debug_output_dir is None:
+        print("  [DEBUG] Warning: debug_enabled is True but debug_output_dir is None. Debug files will not be written.")
+        debug_enabled = False
+    
+    # Phase 1: Setup
     # Convert threshold from meters to degrees
     # 1 degree ≈ 111 km = 111,000 meters
     METERS_TO_DEGREES = 1.0 / 111000.0
@@ -1035,7 +1237,7 @@ def consolidate_auto_generated_nodes(
     end_ids = gdf_ofds_spans["end"].apply(extract_id)
     span_endpoint_ids = set(pd.concat([start_ids, end_ids]).dropna())
 
-    # Phase 2: Analysis and Distance Calculation
+    # Phase 2: Analysis
     print(f"\nAnalyzing {len(auto_gen_nodes)} auto-generated nodes:")
     print("-" * 80)
 
@@ -1069,46 +1271,12 @@ def consolidate_auto_generated_nodes(
                 nearest_point_on_span = nearest_point
 
         status = "endpoint" if is_endpoint else "isolated"
-        print(f"\nNode ID: {node_id}")
-        print(f"  Status: {status}")
-        print(f"  Coordinates: ({node_point.x:.6f}, {node_point.y:.6f})")
-
-        if min_node_distance < float("inf"):
-            distance_km = min_node_distance * DEGREES_TO_KM
-            print(
-                f"  Nearest node distance: {distance_km:.3f} km "
-                f"({min_node_distance:.6f} degrees)"
-            )
-            if nearest_node_id:
-                nearest_node = other_nodes[other_nodes["id"] == nearest_node_id]
-                if not nearest_node.empty:
-                    print(f"  Nearest node ID: {nearest_node_id}")
-                    print(f"  Nearest node name: {nearest_node.iloc[0]['name']}")
-        else:
-            print("  Nearest node distance: N/A (no other nodes)")
-
-        if min_span_distance < float("inf"):
-            distance_km = min_span_distance * DEGREES_TO_KM
-            print(
-                f"  Nearest span distance: {distance_km:.3f} km "
-                f"({min_span_distance:.6f} degrees)"
-            )
-            print(f"  Nearest span ID: {nearest_span_id}")
-            if nearest_point_on_span:
-                print(
-                    f"  Nearest point on span: "
-                    f"({nearest_point_on_span.x:.6f}, {nearest_point_on_span.y:.6f})"
-                )
-        else:
-            print("  Nearest span distance: N/A (no spans)")
-
-    print("-" * 80)
-    
+ 
     # Write debug files before Phase 3 (initial state)
     if debug_enabled:
-        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase2_before", debug_output_prefix)
+        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase2", debug_output_prefix)
 
-    # Phase 3: Merge Auto-Generated Nodes with Proper Nodes (moved before joining spans)
+    # Phase 3: Merge Auto-Generated with Proper Nodes
     # Find all clusters where auto-generated nodes are within threshold of proper nodes
     coordinates = np.array([(point.x, point.y) for point in gdf_ofds_nodes.geometry])
     tree = KDTree(coordinates)
@@ -1240,9 +1408,7 @@ def consolidate_auto_generated_nodes(
     if debug_enabled:
         write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase3", debug_output_prefix)
 
-    # Phase 4: Join spans connected to close auto-generated nodes
-    # When two auto-generated nodes are within threshold, remove both nodes
-    # and join the spans that were connected to them into a single span
+    # Phase 4: Merge 3+ Auto-Generated Node Clusters
     # Re-filter auto-generated nodes after Phase 3 merges
     auto_gen_nodes = gdf_ofds_nodes[
         gdf_ofds_nodes["name"] == "Auto generated missing node"
@@ -1250,26 +1416,225 @@ def consolidate_auto_generated_nodes(
     filtered_nodes = auto_gen_nodes.copy()
     coordinates = np.array([(point.x, point.y) for point in filtered_nodes.geometry])
     
+    nodes_to_remove_phase4 = set()
+    new_fork_nodes = []
+    
     if len(coordinates) > 0:
         tree = KDTree(coordinates)
-        # Find clusters of nodes within threshold
-        close_clusters = [
+        # Find all clusters of nodes within threshold
+        all_clusters = [
             indices
             for indices in tree.query_radius(coordinates, r=threshold)
-            if len(indices) == 2  # Only process clusters with exactly 2 nodes
+            if len(indices) >= 2  # Process clusters with 2+ nodes
         ]
+        
+        # Separate clusters into pairs (2 nodes) and larger clusters (3+ nodes)
+        pair_clusters = [c for c in all_clusters if len(c) == 2]
+        larger_clusters = [c for c in all_clusters if len(c) >= 3]
+        
+        # Remove duplicate clusters (same nodes, different order)
+        def normalize_cluster(cluster):
+            return tuple(sorted(cluster))
+        
+        unique_larger_clusters = list(set([normalize_cluster(c) for c in larger_clusters]))
 
-        # Convert clusters to pairs (each cluster of 2 nodes becomes one pair)
+        # Process larger clusters (3+ nodes):
+        # Merge them into a single "network fork" node
+        # All spans connected to those nodes terminate at the "network fork" node
+        for cluster in unique_larger_clusters:
+            # Get all node IDs in this cluster
+            cluster_node_ids = [filtered_nodes.iloc[idx]["id"] for idx in cluster]
+            cluster_node_indices = list(cluster)
+            # Get all node IDs in this cluster
+            cluster_node_ids = [filtered_nodes.iloc[idx]["id"] for idx in cluster]
+            cluster_node_indices = list(cluster)
+            
+            # Calculate centroid of all nodes in cluster
+            cluster_points = [filtered_nodes.iloc[idx].geometry for idx in cluster]
+            centroid_x = sum(p.x for p in cluster_points) / len(cluster_points)
+            centroid_y = sum(p.y for p in cluster_points) / len(cluster_points)
+            fork_location = Point(centroid_x, centroid_y)
+            
+            # Get network info from first node in cluster
+            first_node_row = filtered_nodes.iloc[cluster_node_indices[0]]
+            network_info = first_node_row.get("network", {})
+            physical_infrastructure_provider = first_node_row.get("physicalInfrastructureProvider", {})
+            network_providers = first_node_row.get("networkProviders", [])
+            
+            # Create new "network fork" node
+            fork_node_id = str(uuid.uuid4())
+            fork_node = {
+                "id": fork_node_id,
+                "name": "network fork",
+                "geometry": fork_location,
+                "network": network_info,
+                "physicalInfrastructureProvider": physical_infrastructure_provider,
+                "networkProviders": network_providers,
+                "featureType": "node",
+            }
+            new_fork_nodes.append(fork_node)
+            
+            # Find all spans connected to any node in the cluster
+            connected_spans = []
+            for span_idx, span_row in gdf_ofds_spans.iterrows():
+                start_dict = (
+                    json.loads(span_row["start"])
+                    if isinstance(span_row["start"], str) and span_row["start"] is not None
+                    else span_row["start"]
+                )
+                end_dict = (
+                    json.loads(span_row["end"])
+                    if isinstance(span_row["end"], str) and span_row["end"] is not None
+                    else span_row["end"]
+                )
+                
+                start_id = start_dict.get("id") if isinstance(start_dict, dict) else None
+                end_id = end_dict.get("id") if isinstance(end_dict, dict) else None
+                
+                # Get node names to check if endpoints are proper nodes
+                start_name = start_dict.get("name") if isinstance(start_dict, dict) else None
+                end_name = end_dict.get("name") if isinstance(end_dict, dict) else None
+                
+                # Skip spans that have proper nodes as endpoints (already merged in Phase 3)
+                # Phase 4 should only process spans between auto-generated nodes
+                if (start_name and start_name != "Auto generated missing node" and start_name != "network fork") or \
+                   (end_name and end_name != "Auto generated missing node" and end_name != "network fork"):
+                    # This span has a proper node endpoint - skip it
+                    continue
+                
+                # Check if span is connected to any node in cluster
+                if start_id in cluster_node_ids or end_id in cluster_node_ids:
+                    connected_spans.append((
+                        span_idx, span_row,
+                        start_id in cluster_node_ids,
+                        end_id in cluster_node_ids
+                    ))
+            
+            # Update all connected spans to point to fork node
+            fork_node_info = {
+                "id": fork_node_id,
+                "name": "network fork",
+                "location": {
+                    "type": "Point",
+                    "coordinates": [centroid_x, centroid_y],
+                },
+            }
+            
+            for span_idx, span_row, start_in_cluster, end_in_cluster in connected_spans:
+                start_dict = (
+                    json.loads(span_row["start"])
+                    if isinstance(span_row["start"], str) and span_row["start"] is not None
+                    else span_row["start"]
+                )
+                end_dict = (
+                    json.loads(span_row["end"])
+                    if isinstance(span_row["end"], str) and span_row["end"] is not None
+                    else span_row["end"]
+                )
+                
+                span_geometry = span_row["geometry"]
+                updated_coords = list(span_geometry.coords)
+                updated = False
+                
+                # Update start endpoint if it's in cluster
+                if start_in_cluster and isinstance(start_dict, dict):
+                    start_dict["id"] = fork_node_id
+                    start_dict["name"] = "network fork"
+                    if "location" in start_dict:
+                        start_dict["location"]["coordinates"] = [centroid_x, centroid_y]
+                    # Extend geometry to fork location
+                    updated_coords[0] = (centroid_x, centroid_y)
+                    updated = True
+                
+                # Update end endpoint if it's in cluster
+                if end_in_cluster and isinstance(end_dict, dict):
+                    end_dict["id"] = fork_node_id
+                    end_dict["name"] = "network fork"
+                    if "location" in end_dict:
+                        end_dict["location"]["coordinates"] = [centroid_x, centroid_y]
+                    # Extend geometry to fork location
+                    updated_coords[-1] = (centroid_x, centroid_y)
+                    updated = True
+                
+                if updated:
+                    # Remove duplicate consecutive coordinates
+                    cleaned_coords = [updated_coords[0]]
+                    for coord in updated_coords[1:]:
+                        if coord != cleaned_coords[-1]:
+                            cleaned_coords.append(coord)
+                    
+                    # Ensure we have at least 2 coordinates for a valid LineString
+                    if len(cleaned_coords) >= 2:
+                        span_geometry = LineString(cleaned_coords)
+                        gdf_ofds_spans.at[span_idx, "geometry"] = span_geometry
+                        gdf_ofds_spans.at[span_idx, "start"] = json.dumps(convert_to_serializable(start_dict))
+                        gdf_ofds_spans.at[span_idx, "end"] = json.dumps(convert_to_serializable(end_dict))
+                    else:
+                        # Skip spans that would have invalid geometry (only 1 point)
+                        print(f"Warning: Skipping span {span_idx} - insufficient coordinates after cleaning ({len(cleaned_coords)} point(s))")
+            
+            # Mark all nodes in cluster for removal
+            for node_id in cluster_node_ids:
+                nodes_to_remove_phase4.add(node_id)
+        
+        # Add new fork nodes to the nodes GeoDataFrame
+        if new_fork_nodes:
+            fork_nodes_gdf = gpd.GeoDataFrame(new_fork_nodes, crs=gdf_ofds_nodes.crs)
+            gdf_ofds_nodes = pd.concat([gdf_ofds_nodes, fork_nodes_gdf], ignore_index=True)
+
+        # Remove the nodes processed in Phase 4
+        if nodes_to_remove_phase4:
+            gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes["id"].isin(list(nodes_to_remove_phase4))]
+            clusters_processed = len(unique_larger_clusters)
+            fork_nodes_created = len(new_fork_nodes)
+            print(
+                f"Phase 4: Processed {clusters_processed} clusters (3+ nodes). "
+                f"Removed {len(nodes_to_remove_phase4)} auto-generated nodes, "
+                f"created {fork_nodes_created} network fork nodes. "
+                f"Remaining nodes: {len(gdf_ofds_nodes)}"
+            )
+    
+    # Write debug files after Phase 4
+    if debug_enabled:
+        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase4", debug_output_prefix)
+
+    # Phase 5: Merge 2 Auto-Generated Node Pairs
+    # Re-filter auto-generated nodes after Phase 4 merges
+    auto_gen_nodes = gdf_ofds_nodes[
+        gdf_ofds_nodes["name"] == "Auto generated missing node"
+    ]
+    filtered_nodes = auto_gen_nodes.copy()
+    coordinates = np.array([(point.x, point.y) for point in filtered_nodes.geometry])
+    
+    nodes_to_remove_phase45 = set()
+    spans_to_remove = []
+    new_spans = []
+    
+    if len(coordinates) > 0:
+        tree = KDTree(coordinates)
+        # Find all clusters of nodes within threshold
+        all_clusters = [
+            indices
+            for indices in tree.query_radius(coordinates, r=threshold)
+            if len(indices) >= 2  # Process clusters with 2+ nodes
+        ]
+        
+        # Get only pairs (2 nodes)
+        pair_clusters = [c for c in all_clusters if len(c) == 2]
+        
+        # Remove duplicate clusters (same nodes, different order)
+        def normalize_cluster(cluster):
+            return tuple(sorted(cluster))
+        
+        unique_pair_clusters = list(set([normalize_cluster(c) for c in pair_clusters]))
+
+        # Convert pair clusters to pairs (each cluster of 2 nodes becomes one pair)
         unique_pairs = [
             (min(cluster[0], cluster[1]), max(cluster[0], cluster[1]))
-            for cluster in close_clusters
+            for cluster in unique_pair_clusters
         ]
         # Remove duplicate pairs
         unique_pairs = list(set(unique_pairs))
-
-        nodes_to_remove = set()
-        spans_to_remove = []
-        new_spans = []
 
         for pair in unique_pairs:
             node_a_idx = pair[0]
@@ -1286,13 +1651,21 @@ def consolidate_auto_generated_nodes(
                 end_dict = json.loads(span_row["end"])
                 start_id = start_dict.get("id") if start_dict else None
                 end_id = end_dict.get("id") if end_dict else None
+                
+                # Check if span is connected to Node A or Node B
+                connected_to_a = (start_id == node_a_id or end_id == node_a_id)
+                connected_to_b = (start_id == node_b_id or end_id == node_b_id)
+                
+                # Only process spans that are connected to at least one of our target nodes
+                if not (connected_to_a or connected_to_b):
+                    continue
 
                 # Check if span is connected to Node A
-                if start_id == node_a_id or end_id == node_a_id:
+                if connected_to_a:
                     spans_connected_to_a.append((span_idx, span_row, start_id == node_a_id))
 
                 # Check if span is connected to Node B
-                if start_id == node_b_id or end_id == node_b_id:
+                if connected_to_b:
                     spans_connected_to_b.append((span_idx, span_row, start_id == node_b_id))
 
             # Join spans: combine all spans connected to Node A and Node B
@@ -1308,120 +1681,164 @@ def consolidate_auto_generated_nodes(
                     # Span connects both nodes - mark it
                     unique_connected_spans[span_idx] = (span_row, True, True)
 
-            if len(unique_connected_spans) >= 2:
-                # Collect all LineString geometries to join
-                # Track which nodes correspond to the start and end of each geometry
-                geometries_to_join = []
-                geometry_start_nodes = []  # Node at the start of each geometry
-                geometry_end_nodes = []    # Node at the end of each geometry
-
-                for span_idx, (span_row, connects_to_a, connects_to_b) in unique_connected_spans.items():
-                    span_geom = span_row["geometry"]
-                    start_dict = json.loads(span_row["start"])
-                    end_dict = json.loads(span_row["end"])
-                    start_id = start_dict.get("id") if start_dict else None
-                    end_id = end_dict.get("id") if end_dict else None
-
-                    # Check if span connects both nodes (A to B or B to A)
-                    connects_both = (
-                        (start_id == node_a_id and end_id == node_b_id) or
-                        (start_id == node_b_id and end_id == node_a_id)
-                    )
-
-                    if connects_both:
-                        # Span connects both nodes - include it as-is
-                        # This span will be in the middle, so we don't track its nodes
-                        geometries_to_join.append(span_geom)
-                        geometry_start_nodes.append(None)
-                        geometry_end_nodes.append(None)
-                    elif start_id == node_a_id or start_id == node_b_id:
-                        # Node A or B is at start, so other end (end_dict) is at the end
-                        # Reverse geometry so it goes from other end toward the removed node
-                        reversed_geom = LineString(list(span_geom.coords)[::-1])
-                        geometries_to_join.append(reversed_geom)
-                        # The "other end" node (end_dict) is at the END of the reversed geometry
-                        geometry_start_nodes.append(None)
-                        geometry_end_nodes.append(end_dict)
+            # When exactly 2 auto-generated nodes are in proximity:
+            # If exactly 2 spans are connected, merge them into a single span and remove both nodes
+            if len(unique_connected_spans) == 2:
+                # Exactly 2 spans: merge them into a single span
+                # First, collect span information
+                span_list = list(unique_connected_spans.items())
+                span1_idx, (span1_row, connects_to_a1, connects_to_b1) = span_list[0]
+                span2_idx, (span2_row, connects_to_a2, connects_to_b2) = span_list[1]
+                
+                span1_geom = span1_row["geometry"]
+                span2_geom = span2_row["geometry"]
+                
+                span1_start_dict = (
+                    json.loads(span1_row["start"])
+                    if isinstance(span1_row["start"], str) and span1_row["start"] is not None
+                    else span1_row["start"]
+                )
+                span1_end_dict = (
+                    json.loads(span1_row["end"])
+                    if isinstance(span1_row["end"], str) and span1_row["end"] is not None
+                    else span1_row["end"]
+                )
+                span2_start_dict = (
+                    json.loads(span2_row["start"])
+                    if isinstance(span2_row["start"], str) and span2_row["start"] is not None
+                    else span2_row["start"]
+                )
+                span2_end_dict = (
+                    json.loads(span2_row["end"])
+                    if isinstance(span2_row["end"], str) and span2_row["end"] is not None
+                    else span2_row["end"]
+                )
+                
+                # Identify which endpoints are connected to the auto-generated nodes
+                span1_start_id = span1_start_dict.get("id") if isinstance(span1_start_dict, dict) else None
+                span1_end_id = span1_end_dict.get("id") if isinstance(span1_end_dict, dict) else None
+                span2_start_id = span2_start_dict.get("id") if isinstance(span2_start_dict, dict) else None
+                span2_end_id = span2_end_dict.get("id") if isinstance(span2_end_dict, dict) else None
+                
+                # Determine which endpoint of span1 is connected to Node A or B
+                span1_connected_to_auto = None
+                span1_other_end = None
+                if span1_start_id == node_a_id or span1_start_id == node_b_id:
+                    span1_connected_to_auto = "start"
+                    span1_other_end = span1_end_dict
+                elif span1_end_id == node_a_id or span1_end_id == node_b_id:
+                    span1_connected_to_auto = "end"
+                    span1_other_end = span1_start_dict
+                
+                # Determine which endpoint of span2 is connected to Node A or B
+                span2_connected_to_auto = None
+                span2_other_end = None
+                if span2_start_id == node_a_id or span2_start_id == node_b_id:
+                    span2_connected_to_auto = "start"
+                    span2_other_end = span2_end_dict
+                elif span2_end_id == node_a_id or span2_end_id == node_b_id:
+                    span2_connected_to_auto = "end"
+                    span2_other_end = span2_start_dict
+                
+                # Orient spans so the auto-generated node endpoints are connected
+                # The merged span should go from span1's other end to span2's other end
+                # We need to connect the auto-generated node endpoints together
+                if span1_connected_to_auto == "start" and span2_connected_to_auto == "start":
+                    # Both connected at start: span1 = A->X, span2 = B->Y
+                    # Reverse span1 to get X->A, then join with B->Y to get X->A->B->Y
+                    geom1 = LineString(list(span1_geom.coords)[::-1])
+                    geom2 = span2_geom
+                    new_start_node = span1_other_end
+                    new_end_node = span2_other_end
+                elif span1_connected_to_auto == "start" and span2_connected_to_auto == "end":
+                    # Span1 at start (A->X), span2 at end (Y->B)
+                    # Join A->X with Y->B to get A->X->Y->B, then reverse to get X->Y->B->A
+                    # Actually, we want X->Y, so reverse span1: X->A, reverse span2: B->Y
+                    # Join: X->A + B->Y = X->A->B->Y, which becomes X->Y
+                    geom1 = LineString(list(span1_geom.coords)[::-1])
+                    geom2 = LineString(list(span2_geom.coords)[::-1])
+                    new_start_node = span1_other_end
+                    new_end_node = span2_other_end
+                elif span1_connected_to_auto == "end" and span2_connected_to_auto == "start":
+                    # Span1 at end (X->A), span2 at start (B->Y)
+                    # Join X->A with B->Y to get X->A->B->Y, which becomes X->Y
+                    geom1 = span1_geom
+                    geom2 = span2_geom
+                    new_start_node = span1_other_end
+                    new_end_node = span2_other_end
+                elif span1_connected_to_auto == "end" and span2_connected_to_auto == "end":
+                    # Both connected at end: span1 = X->A, span2 = Y->B
+                    # Reverse span2 to get B->Y, then join with X->A to get X->A->B->Y
+                    geom1 = span1_geom
+                    geom2 = LineString(list(span2_geom.coords)[::-1])
+                    new_start_node = span1_other_end
+                    new_end_node = span2_other_end
+                else:
+                    # Fallback: use closest ends (shouldn't happen if spans are connected to nodes)
+                    span1_start_coord = span1_geom.coords[0]
+                    span1_end_coord = span1_geom.coords[-1]
+                    span2_start_coord = span2_geom.coords[0]
+                    span2_end_coord = span2_geom.coords[-1]
+                    
+                    span1_start_point = Point(span1_start_coord)
+                    span1_end_point = Point(span1_end_coord)
+                    span2_start_point = Point(span2_start_coord)
+                    span2_end_point = Point(span2_end_coord)
+                    
+                    dist_start1_end2 = span1_start_point.distance(span2_end_point)
+                    dist_end1_start2 = span1_end_point.distance(span2_start_point)
+                    
+                    if dist_start1_end2 <= dist_end1_start2:
+                        geom1 = span1_geom
+                        geom2 = LineString(list(span2_geom.coords)[::-1])
+                        new_start_node = span1_start_dict
+                        new_end_node = span2_start_dict
                     else:
-                        # Node A or B is at end, so other end (start_dict) is at the start
-                        # Keep geometry as is (goes from start toward the removed node)
-                        geometries_to_join.append(span_geom)
-                        # The "other end" node (start_dict) is at the START of the geometry
-                        geometry_start_nodes.append(start_dict)
-                        geometry_end_nodes.append(None)
+                        geom1 = LineString(list(span1_geom.coords)[::-1])
+                        geom2 = span2_geom
+                        new_start_node = span1_end_dict
+                        new_end_node = span2_end_dict
+                
+                # Join the geometries
+                joined_coords = list(geom1.coords) + list(geom2.coords)
+                
+                # Remove duplicate consecutive coordinates
+                cleaned_coords = [joined_coords[0]]
+                for coord in joined_coords[1:]:
+                    if coord != cleaned_coords[-1]:
+                        cleaned_coords.append(coord)
+                
+                if len(cleaned_coords) >= 2:
+                    joined_geometry = LineString(cleaned_coords)
+                    
+                    # Create new span
+                    new_span = span1_row.copy()
+                    new_span["id"] = str(uuid.uuid4())
+                    new_span["geometry"] = joined_geometry
+                    if new_start_node:
+                        new_span["start"] = json.dumps(
+                            convert_to_serializable(new_start_node)
+                        )
+                    else:
+                        new_span["start"] = None
+                    if new_end_node:
+                        new_span["end"] = json.dumps(
+                            convert_to_serializable(new_end_node)
+                        )
+                    else:
+                        new_span["end"] = None
+                    
+                    new_spans.append(new_span)
+                
+                # Mark both spans for removal
+                if span1_idx not in spans_to_remove:
+                    spans_to_remove.append(span1_idx)
+                if span2_idx not in spans_to_remove:
+                    spans_to_remove.append(span2_idx)
 
-                    # Mark span for removal
-                    if span_idx not in spans_to_remove:
-                        spans_to_remove.append(span_idx)
-
-                # Join all geometries into a single LineString
-                if geometries_to_join:
-                    # Concatenate coordinates from all LineStrings
-                    joined_coords = []
-                    for geom in geometries_to_join:
-                        joined_coords.extend(list(geom.coords))
-
-                    # Remove duplicate consecutive coordinates
-                    cleaned_coords = [joined_coords[0]]
-                    for coord in joined_coords[1:]:
-                        if coord != cleaned_coords[-1]:
-                            cleaned_coords.append(coord)
-
-                    if len(cleaned_coords) >= 2:
-                        joined_geometry = LineString(cleaned_coords)
-
-                        # Determine start and end nodes for the joined span
-                        # The start node is the "other end" node from the first geometry
-                        # The end node is the "other end" node from the last geometry
-                        new_start_node = None
-                        new_end_node = None
-                        
-                        # Find the first "other end" node (from start_nodes or end_nodes of first geometry)
-                        if geometry_start_nodes and geometry_start_nodes[0] is not None:
-                            new_start_node = geometry_start_nodes[0]
-                        elif geometry_end_nodes and geometry_end_nodes[0] is not None:
-                            new_start_node = geometry_end_nodes[0]
-                        
-                        # Find the last "other end" node (from start_nodes or end_nodes of last geometry)
-                        if geometry_end_nodes and geometry_end_nodes[-1] is not None:
-                            new_end_node = geometry_end_nodes[-1]
-                        elif geometry_start_nodes and geometry_start_nodes[-1] is not None:
-                            new_end_node = geometry_start_nodes[-1]
-                        
-                        # Fallback: collect all valid nodes and use first/last
-                        all_valid_nodes = [
-                            n for n in geometry_start_nodes + geometry_end_nodes if n is not None
-                        ]
-                        if new_start_node is None and all_valid_nodes:
-                            new_start_node = all_valid_nodes[0]
-                        if new_end_node is None and all_valid_nodes:
-                            if len(all_valid_nodes) > 1:
-                                new_end_node = all_valid_nodes[-1]
-                            else:
-                                new_end_node = all_valid_nodes[0]
-
-                        # Create new span
-                        new_span = span_row.copy()
-                        new_span["id"] = str(uuid.uuid4())
-                        new_span["geometry"] = joined_geometry
-                        if new_start_node:
-                            new_span["start"] = json.dumps(
-                                convert_to_serializable(new_start_node)
-                            )
-                        else:
-                            new_span["start"] = None
-                        if new_end_node:
-                            new_span["end"] = json.dumps(
-                                convert_to_serializable(new_end_node)
-                            )
-                        else:
-                            new_span["end"] = None
-
-                        new_spans.append(new_span)
-
-            # Mark both nodes for removal
-            nodes_to_remove.add(node_a_id)
-            nodes_to_remove.add(node_b_id)
+                # Mark both nodes for removal
+                nodes_to_remove_phase45.add(node_a_id)
+                nodes_to_remove_phase45.add(node_b_id)
 
         # Remove old spans and add new joined spans
         if spans_to_remove:
@@ -1432,46 +1849,366 @@ def consolidate_auto_generated_nodes(
                     [gdf_ofds_spans, new_spans_gdf], ignore_index=True
                 )
 
-        # Remove the nodes
-        if nodes_to_remove:
-            gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes["id"].isin(nodes_to_remove)]
+        # Remove the nodes processed in Phase 5
+        if nodes_to_remove_phase45:
+            gdf_ofds_nodes = gdf_ofds_nodes[~gdf_ofds_nodes["id"].isin(list(nodes_to_remove_phase45))]
+            pairs_processed = len(unique_pairs)
             print(
-                f"Phase 4: Removed {len(nodes_to_remove)} auto-generated nodes and "
+                f"Phase 5: Processed {pairs_processed} pairs (2 nodes). "
+                f"Removed {len(nodes_to_remove_phase45)} auto-generated nodes, "
                 f"joined {len(spans_to_remove)} spans into {len(new_spans)} spans. "
                 f"Remaining nodes: {len(gdf_ofds_nodes)}"
             )
     
-    # Write debug files after Phase 4
+    # Write debug files after Phase 5
     if debug_enabled:
-        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase4", debug_output_prefix)
+        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase5", debug_output_prefix)
 
-    # Phase 5: Move and Split at Auto-Generated Nodes Near Spans
-    # Process auto-generated nodes that are near spans (but not necessarily endpoints)
-    # to create fork points by splitting spans
-    # Note: gdf_ofds_nodes has already been filtered by Phases 3 and 4 to remove
-    # nodes that were merged or joined, so we only process remaining auto-generated nodes
+    # Phase 6: Split Spans at Auto-Generated Nodes
+    # For auto-generated nodes that are endpoints of spans and in proximity to another span
+    # (but not near an endpoint of that span), extend the span and split the other span
+    # to create a network fork with three connected spans
+    
+    # Get all auto-generated nodes that are endpoints of spans
+    start_ids = gdf_ofds_spans["start"].apply(extract_id)
+    end_ids = gdf_ofds_spans["end"].apply(extract_id)
+    span_endpoint_ids = set(pd.concat([start_ids, end_ids]).dropna())
+    
+    auto_gen_endpoint_nodes = gdf_ofds_nodes[
+        (gdf_ofds_nodes["name"] == "Auto generated missing node") &
+        (gdf_ofds_nodes["id"].isin(span_endpoint_ids))
+    ]
+    
+    spans_to_remove = []
+    new_spans = []
+    nodes_to_rename = {}
+    node_processing_status = {}
+    
+    for node_idx, node_row in auto_gen_endpoint_nodes.iterrows():
+        node_point = node_row.geometry
+        node_id = node_row["id"]
+        
+        # Find the span where this node is an endpoint
+        node_span_idx = None
+        node_is_start = False
+        for span_idx, span_row in gdf_ofds_spans.iterrows():
+            if span_idx in spans_to_remove:
+                continue
+            span_start = (
+                json.loads(span_row["start"])
+                if isinstance(span_row["start"], str)
+                else span_row["start"]
+            )
+            span_end = (
+                json.loads(span_row["end"])
+                if isinstance(span_row["end"], str)
+                else span_row["end"]
+            )
+            if isinstance(span_start, dict) and span_start.get("id") == node_id:
+                node_span_idx = span_idx
+                node_is_start = True
+                break
+            elif isinstance(span_end, dict) and span_end.get("id") == node_id:
+                node_span_idx = span_idx
+                node_is_start = False
+                break
+        
+        if node_span_idx is None:
+            node_processing_status[node_id] = "SKIPPED: Not found as endpoint of any span"
+            continue
+        
+        # Find nearest span (excluding the span where this node is an endpoint)
+        min_span_distance = float("inf")
+        nearest_span_idx = None
+        nearest_point_on_span = None
+        
+        for span_idx, span_row in gdf_ofds_spans.iterrows():
+            if span_idx in spans_to_remove or span_idx == node_span_idx:
+                continue
+            span_line = span_row.geometry
+            nearest_point = nearest_points(node_point, span_line)[1]
+            distance = node_point.distance(nearest_point)
+            if distance < min_span_distance:
+                min_span_distance = distance
+                nearest_span_idx = span_idx
+                nearest_point_on_span = nearest_point
+        
+        # Check if within threshold
+        if min_span_distance == float("inf") or min_span_distance > threshold:
+            dist_str = f"{(min_span_distance / METERS_TO_DEGREES):.2f}" if min_span_distance != float("inf") else "inf"
+            node_processing_status[node_id] = f"SKIPPED: Too far ({dist_str}m > {threshold_meters}m)"
+            continue
+        
+        if nearest_span_idx is None or nearest_point_on_span is None:
+            node_processing_status[node_id] = "SKIPPED: Could not find nearest span"
+            continue
+        
+        # Check if nearest point is at an endpoint of the span (skip if so)
+        target_span_row = gdf_ofds_spans.loc[nearest_span_idx]
+        target_span_line = target_span_row.geometry
+        target_start_point = Point(target_span_line.coords[0])
+        target_end_point = Point(target_span_line.coords[-1])
+        endpoint_tolerance = 1e-6
+        
+        if (
+            nearest_point_on_span.distance(target_start_point) < endpoint_tolerance
+            or nearest_point_on_span.distance(target_end_point) < endpoint_tolerance
+        ):
+            node_processing_status[node_id] = "SKIPPED: Nearest point is at span endpoint"
+            continue
+        
+        # Process: extend node's span, split target span, create fork
+        # 1. Extend the span that has the auto-generated node to the fork point
+        node_span_row = gdf_ofds_spans.loc[node_span_idx]
+        node_span_geom = node_span_row.geometry
+        node_span_start = (
+            json.loads(node_span_row["start"])
+            if isinstance(node_span_row["start"], str)
+            else node_span_row["start"]
+        )
+        node_span_end = (
+            json.loads(node_span_row["end"])
+            if isinstance(node_span_row["end"], str)
+            else node_span_row["end"]
+        )
+        
+        # Create fork node info
+        fork_node_info = {
+            "id": node_id,
+            "name": "network fork",
+            "location": {
+                "type": "Point",
+                "coordinates": [nearest_point_on_span.x, nearest_point_on_span.y],
+            },
+        }
+        
+        # Extend the node's span to the fork point
+        node_span_coords = list(node_span_geom.coords)
+        fork_coord = (nearest_point_on_span.x, nearest_point_on_span.y)
+        
+        if node_is_start:
+            # Node is at start, extend from start
+            if Point(node_span_coords[0]).distance(nearest_point_on_span) > 1e-9:
+                node_span_coords.insert(0, fork_coord)
+            extended_node_span_start = fork_node_info
+            extended_node_span_end = node_span_end.copy() if isinstance(node_span_end, dict) else node_span_end
+        else:
+            # Node is at end, extend from end
+            if Point(node_span_coords[-1]).distance(nearest_point_on_span) > 1e-9:
+                node_span_coords.append(fork_coord)
+            extended_node_span_start = node_span_start.copy() if isinstance(node_span_start, dict) else node_span_start
+            extended_node_span_end = fork_node_info
+        
+        # Create extended span
+        extended_span = node_span_row.copy()
+        extended_span["geometry"] = LineString(node_span_coords)
+        extended_span["start"] = json.dumps(convert_to_serializable(extended_node_span_start))
+        extended_span["end"] = json.dumps(convert_to_serializable(extended_node_span_end))
+        new_spans.append(extended_span)
+        spans_to_remove.append(node_span_idx)
+        
+        # 2. Split the target span at the fork point
+        target_coords = list(target_span_line.coords)
+        split_coord = (nearest_point_on_span.x, nearest_point_on_span.y)
+        
+        # Find where to insert the split point by finding the closest segment
+        insert_index = None
+        min_dist_to_segment = float("inf")
+        
+        for i in range(len(target_coords) - 1):
+            seg_line = LineString([target_coords[i], target_coords[i + 1]])
+            dist_to_seg = nearest_point_on_span.distance(seg_line)
+            if dist_to_seg < min_dist_to_segment:
+                min_dist_to_segment = dist_to_seg
+                # Determine insertion point based on which end of segment is closer
+                seg_start_pt = Point(target_coords[i])
+                seg_end_pt = Point(target_coords[i + 1])
+                dist_to_start = nearest_point_on_span.distance(seg_start_pt)
+                dist_to_end = nearest_point_on_span.distance(seg_end_pt)
+                
+                if dist_to_start < 1e-6:
+                    # Point is at start of segment
+                    insert_index = i
+                elif dist_to_end < 1e-6:
+                    # Point is at end of segment
+                    insert_index = i + 1
+                else:
+                    # Point is somewhere in the middle of the segment
+                    insert_index = i + 1
+        
+        if insert_index is None:
+            node_processing_status[node_id] = "SKIPPED: Could not determine split location"
+            continue
+        
+        # Check if point already exists at this index (within tolerance)
+        point_exists = False
+        if insert_index < len(target_coords):
+            existing_pt = Point(target_coords[insert_index])
+            if existing_pt.distance(nearest_point_on_span) < 1e-6:
+                point_exists = True
+        
+        if not point_exists:
+            target_coords.insert(insert_index, split_coord)
+        
+        # Create two segments
+        segment1_coords = target_coords[:insert_index + 1]
+        segment2_coords = target_coords[insert_index:]
+        
+        if len(segment1_coords) < 2 or len(segment2_coords) < 2:
+            node_processing_status[node_id] = "SKIPPED: Insufficient points for segments"
+            continue
+        
+        segment1 = LineString(segment1_coords)
+        segment2 = LineString(segment2_coords)
+        
+        # Get target span endpoints
+        target_start = (
+            json.loads(target_span_row["start"])
+            if isinstance(target_span_row["start"], str)
+            else target_span_row["start"]
+        )
+        target_end = (
+            json.loads(target_span_row["end"])
+            if isinstance(target_span_row["end"], str)
+            else target_span_row["end"]
+        )
+        
+        # Determine which segment connects to which endpoint
+        seg1_start_pt = Point(segment1.coords[0])
+        seg1_end_pt = Point(segment1.coords[-1])
+        target_start_pt = Point(target_start["location"]["coordinates"]) if target_start else None
+        
+        if target_start_pt and seg1_start_pt.distance(target_start_pt) < 1e-3:
+            # Segment1 connects to start
+            new_span1_start = target_start
+            new_span1_end = fork_node_info
+            new_span1_geom = segment1
+            new_span2_start = fork_node_info
+            new_span2_end = target_end
+            new_span2_geom = segment2
+        elif target_start_pt and seg1_end_pt.distance(target_start_pt) < 1e-3:
+            # Segment1 reversed connects to start
+            new_span1_start = target_start
+            new_span1_end = fork_node_info
+            new_span1_geom = segment2
+            new_span2_start = fork_node_info
+            new_span2_end = target_end
+            new_span2_geom = segment1
+        else:
+            # Segment1 connects to end
+            new_span1_start = target_start
+            new_span1_end = fork_node_info
+            new_span1_geom = segment2
+            new_span2_start = fork_node_info
+            new_span2_end = target_end
+            new_span2_geom = segment1
+        
+        # Create two new spans from the split
+        split_span1 = target_span_row.copy()
+        split_span1["id"] = str(uuid.uuid4())
+        split_span1["geometry"] = new_span1_geom
+        split_span1["start"] = json.dumps(convert_to_serializable(new_span1_start))
+        split_span1["end"] = json.dumps(convert_to_serializable(new_span1_end))
+        
+        split_span2 = target_span_row.copy()
+        split_span2["id"] = str(uuid.uuid4())
+        split_span2["geometry"] = new_span2_geom
+        split_span2["start"] = json.dumps(convert_to_serializable(new_span2_start))
+        split_span2["end"] = json.dumps(convert_to_serializable(new_span2_end))
+        
+        new_spans.append(split_span1)
+        new_spans.append(split_span2)
+        spans_to_remove.append(nearest_span_idx)
+        
+        # Mark node for renaming and moving
+        nodes_to_rename[node_id] = nearest_point_on_span
+        dist_str = f"{(min_span_distance / METERS_TO_DEGREES):.2f}"
+        node_processing_status[node_id] = f"PROCESSED: Created fork ({dist_str}m from span {nearest_span_idx})"
+
+    # Remove old spans and add new ones
+    if spans_to_remove:
+        gdf_ofds_spans = gdf_ofds_spans.drop(index=spans_to_remove)
+        if new_spans:
+            new_spans_gdf = gpd.GeoDataFrame(new_spans, crs=gdf_ofds_spans.crs)
+            gdf_ofds_spans = pd.concat(
+                [gdf_ofds_spans, new_spans_gdf], ignore_index=True
+            )
+
+    # Update node geometries and names
+    for node_id, new_geometry in nodes_to_rename.items():
+        node_matches = gdf_ofds_nodes[gdf_ofds_nodes["id"] == node_id]
+        if len(node_matches) == 0:
+            print(f"  [WARNING] Phase 6: Node {node_id[:8]}... not found for renaming")
+            continue
+        node_idx = node_matches.index[0]
+        old_name = gdf_ofds_nodes.at[node_idx, "name"]
+        gdf_ofds_nodes.at[node_idx, "geometry"] = new_geometry
+        gdf_ofds_nodes.at[node_idx, "name"] = "network fork"
+        print(f"  [DEBUG] Phase 6: Renamed node {node_id[:8]}... from '{old_name}' to 'network fork'")
+
+    # Add processing status field to nodes for debugging
+    if "phase6_status" not in gdf_ofds_nodes.columns:
+        gdf_ofds_nodes["phase6_status"] = "Not processed"
+    
+    for node_id, status in node_processing_status.items():
+        node_idx = gdf_ofds_nodes[gdf_ofds_nodes["id"] == node_id].index
+        if len(node_idx) > 0:
+            gdf_ofds_nodes.at[node_idx[0], "phase6_status"] = status
+    
+    # Print summary of processing status
+    processed_count = sum(1 for s in node_processing_status.values() if s.startswith("PROCESSED"))
+    skipped_count = len(node_processing_status) - processed_count
+    total_nodes = len(auto_gen_endpoint_nodes)
+    unprocessed_count = total_nodes - len(node_processing_status)
+    
+    print(f"Phase 6: Processed {processed_count} nodes, skipped {skipped_count} nodes, {unprocessed_count} nodes not evaluated")
+    
+    if nodes_to_rename:
+        print(
+            f"Phase 6: Moved and renamed {len(nodes_to_rename)} nodes to fork points, "
+            f"split {len(spans_to_remove)} spans"
+        )
+    
+    # Print details for skipped nodes (for debugging)
+    if skipped_count > 0:
+        print("  Phase 6 skipped nodes:")
+        for node_id, status in node_processing_status.items():
+            if status.startswith("SKIPPED"):
+                node_idx = gdf_ofds_nodes[gdf_ofds_nodes["id"] == node_id].index
+                if len(node_idx) > 0:
+                    node_name = gdf_ofds_nodes.at[node_idx[0], "name"]
+                    print(f"    Node {node_id[:8]}... ({node_name}): {status}")
+    
+    # Write debug files after Phase 6
+    if debug_enabled:
+        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase6", debug_output_prefix)
+
+    # Phase 7: Split Spans at Proper Nodes
+    # Process proper nodes that are near spans (but not endpoints)
+    # Split spans at the nearest point and connect to the proper node's location
     start_ids = gdf_ofds_spans["start"].apply(extract_id)
     end_ids = gdf_ofds_spans["end"].apply(extract_id)
     span_endpoint_ids = set(pd.concat([start_ids, end_ids]).dropna())
 
-    # Process ALL remaining auto-generated nodes (those not filtered out in Phases 2-4)
-    # These are nodes that still exist after merging/joining operations
-    auto_gen_endpoint_nodes = gdf_ofds_nodes[
-        gdf_ofds_nodes["name"] == "Auto generated missing node"
+    # Process proper nodes (not auto-generated) that are not already span endpoints
+    proper_nodes = gdf_ofds_nodes[
+        (gdf_ofds_nodes["name"] != "Auto generated missing node") &
+        (gdf_ofds_nodes["name"] != "network fork") &
+        (~gdf_ofds_nodes["id"].isin(span_endpoint_ids))
     ]
 
-    spans_to_remove = []
-    new_spans = []
-    nodes_to_rename = {}
+    spans_to_remove_proper = []
+    new_spans_proper = []
 
-    for node_idx, node_row in auto_gen_endpoint_nodes.iterrows():
+    for node_idx, node_row in proper_nodes.iterrows():
         node_point = node_row.geometry
         node_id = node_row["id"]
+        node_name = node_row["name"]
 
         # Find spans where this node is currently an endpoint
         current_span_ids = []
         for span_idx, span_row in gdf_ofds_spans.iterrows():
-            if span_idx in spans_to_remove:
+            if span_idx in spans_to_remove_proper:
                 continue
             span_start = (
                 json.loads(span_row["start"])
@@ -1494,7 +2231,7 @@ def consolidate_auto_generated_nodes(
         nearest_point_on_span = None
 
         for span_idx, span_row in gdf_ofds_spans.iterrows():
-            if span_idx in spans_to_remove or span_idx in current_span_ids:
+            if span_idx in spans_to_remove_proper or span_idx in current_span_ids:
                 continue
             span_line = span_row.geometry
             nearest_point = nearest_points(node_point, span_line)[1]
@@ -1504,7 +2241,7 @@ def consolidate_auto_generated_nodes(
                 nearest_span_idx = span_idx
                 nearest_point_on_span = nearest_point
 
-        # If within threshold, move node and split span
+        # If within threshold, split span and connect to proper node
         if (
             min_span_distance <= threshold
             and nearest_span_idx is not None
@@ -1524,7 +2261,6 @@ def consolidate_auto_generated_nodes(
                 continue
 
             # Insert the split point into the LineString coordinates
-            # Find the segment where the split point should be inserted
             coords = list(span_line.coords)
             split_coord = (nearest_point_on_span.x, nearest_point_on_span.y)
             
@@ -1537,17 +2273,12 @@ def consolidate_auto_generated_nodes(
                 seg_end = Point(coords[i + 1])
                 seg_line = LineString([coords[i], coords[i + 1]])
                 
-                # Check if split point is on this segment
                 dist_to_seg = nearest_point_on_span.distance(seg_line)
                 if dist_to_seg < min_dist_to_segment:
                     min_dist_to_segment = dist_to_seg
-                    # Check if point is closer to start or end of segment
                     dist_to_start = nearest_point_on_span.distance(seg_start)
                     dist_to_end = nearest_point_on_span.distance(seg_end)
                     
-                    # If very close to start, insert at i+1 (after start)
-                    # If very close to end, insert at i+1 (before end)
-                    # Otherwise insert at i+1 (between start and end)
                     if dist_to_start < 1e-9:
                         insert_index = i + 1
                         break
@@ -1559,7 +2290,6 @@ def consolidate_auto_generated_nodes(
             
             # Insert the split point into coordinates
             if insert_index is not None:
-                # Check if the point is already in the coordinates (within tolerance)
                 point_already_exists = False
                 for coord in coords:
                     if Point(coord).distance(nearest_point_on_span) < 1e-9:
@@ -1597,6 +2327,17 @@ def consolidate_auto_generated_nodes(
                 else span_row["end"]
             )
 
+            # Extend segments to the proper node's actual location
+            seg1_end_point = Point(segment1.coords[-1])
+            if seg1_end_point.distance(node_point) > 1e-9:
+                segment1_coords_extended = list(segment1.coords) + [(node_point.x, node_point.y)]
+                segment1 = LineString(segment1_coords_extended)
+            
+            seg2_start_point = Point(segment2.coords[0])
+            if seg2_start_point.distance(node_point) > 1e-9:
+                segment2_coords_extended = [(node_point.x, node_point.y)] + list(segment2.coords)
+                segment2 = LineString(segment2_coords_extended)
+
             # Determine which segment connects to which endpoint
             seg1_start = Point(segment1.coords[0])
             seg1_end = Point(segment1.coords[-1])
@@ -1613,15 +2354,15 @@ def consolidate_auto_generated_nodes(
                 else None
             )
 
-            # Create node info for the moved fork node
-            moved_node_info = {
+            # Create node info for the proper node
+            proper_node_info = {
                 "id": node_id,
-                "name": "network fork",
+                "name": node_name,
                 "location": {
                     "type": "Point",
                     "coordinates": [
-                        nearest_point_on_span.x,
-                        nearest_point_on_span.y,
+                        node_point.x,
+                        node_point.y,
                     ],
                 },
             }
@@ -1632,9 +2373,9 @@ def consolidate_auto_generated_nodes(
                 and seg1_start.distance(original_start_point) < 1e-3
             ):
                 new_span1_start = original_start
-                new_span1_end = moved_node_info
+                new_span1_end = proper_node_info
                 new_span1_geom = segment1
-                new_span2_start = moved_node_info
+                new_span2_start = proper_node_info
                 new_span2_end = original_end
                 new_span2_geom = segment2
             elif (
@@ -1642,9 +2383,9 @@ def consolidate_auto_generated_nodes(
                 and seg2_start.distance(original_start_point) < 1e-3
             ):
                 new_span1_start = original_start
-                new_span1_end = moved_node_info
+                new_span1_end = proper_node_info
                 new_span1_geom = segment2
-                new_span2_start = moved_node_info
+                new_span2_start = proper_node_info
                 new_span2_end = original_end
                 new_span2_geom = segment1
             else:
@@ -1654,16 +2395,16 @@ def consolidate_auto_generated_nodes(
                 )
                 if seg1_matches_end:
                     new_span1_start = original_start
-                    new_span1_end = moved_node_info
+                    new_span1_end = proper_node_info
                     new_span1_geom = segment2
-                    new_span2_start = moved_node_info
+                    new_span2_start = proper_node_info
                     new_span2_end = original_end
                     new_span2_geom = segment1
                 else:
                     new_span1_start = original_start
-                    new_span1_end = moved_node_info
+                    new_span1_end = proper_node_info
                     new_span1_geom = segment1
-                    new_span2_start = moved_node_info
+                    new_span2_start = proper_node_info
                     new_span2_end = original_end
                     new_span2_geom = segment2
 
@@ -1688,118 +2429,160 @@ def consolidate_auto_generated_nodes(
                 convert_to_serializable(new_span2_end)
             )
 
-            new_spans.append(new_span1)
-            new_spans.append(new_span2)
-            spans_to_remove.append(nearest_span_idx)
-
-            # Mark node for renaming and moving
-            nodes_to_rename[node_id] = nearest_point_on_span
-            
-            # Extend spans that were originally connected to this node to meet the fork
-            # Create fork node info for updating endpoints
-            fork_node_info = {
-                "id": node_id,
-                "name": "network fork",
-                "location": {
-                    "type": "Point",
-                    "coordinates": [
-                        nearest_point_on_span.x,
-                        nearest_point_on_span.y,
-                    ],
-                },
-            }
-            
-            # Update spans that have this node as an endpoint
-            for span_idx in current_span_ids:
-                if span_idx in spans_to_remove:
-                    continue
-                    
-                span_to_extend = gdf_ofds_spans.loc[span_idx]
-                span_geom = span_to_extend.geometry
-                span_start = (
-                    json.loads(span_to_extend["start"])
-                    if isinstance(span_to_extend["start"], str)
-                    else span_to_extend["start"]
-                )
-                span_end = (
-                    json.loads(span_to_extend["end"])
-                    if isinstance(span_to_extend["end"], str)
-                    else span_to_extend["end"]
-                )
-                
-                # Check which endpoint is this node
-                is_start_node = (
-                    isinstance(span_start, dict) and span_start.get("id") == node_id
-                )
-                is_end_node = (
-                    isinstance(span_end, dict) and span_end.get("id") == node_id
-                )
-                
-                if is_start_node or is_end_node:
-                    # Extend the span geometry to the fork location
-                    coords = list(span_geom.coords)
-                    fork_coord = (nearest_point_on_span.x, nearest_point_on_span.y)
-                    
-                    if is_start_node:
-                        # Extend from start: add fork coordinate at the beginning
-                        # Check if fork coordinate is already at start (within tolerance)
-                        start_point = Point(coords[0])
-                        if start_point.distance(nearest_point_on_span) > 1e-9:
-                            coords.insert(0, fork_coord)
-                        # Update start endpoint to fork node
-                        new_start = fork_node_info
-                        new_end = span_end
-                    else:  # is_end_node
-                        # Extend from end: add fork coordinate at the end
-                        # Check if fork coordinate is already at end (within tolerance)
-                        end_point = Point(coords[-1])
-                        if end_point.distance(nearest_point_on_span) > 1e-9:
-                            coords.append(fork_coord)
-                        # Update end endpoint to fork node
-                        new_start = span_start
-                        new_end = fork_node_info
-                    
-                    # Update the span geometry and endpoints
-                    extended_geom = LineString(coords)
-                    gdf_ofds_spans.at[span_idx, "geometry"] = extended_geom
-                    gdf_ofds_spans.at[span_idx, "start"] = json.dumps(
-                        convert_to_serializable(new_start)
-                    )
-                    gdf_ofds_spans.at[span_idx, "end"] = json.dumps(
-                        convert_to_serializable(new_end)
-                    )
+            new_spans_proper.append(new_span1)
+            new_spans_proper.append(new_span2)
+            spans_to_remove_proper.append(nearest_span_idx)
 
     # Remove old spans and add new ones
-    if spans_to_remove:
-        gdf_ofds_spans = gdf_ofds_spans.drop(index=spans_to_remove)
-        if new_spans:
-            new_spans_gdf = gpd.GeoDataFrame(new_spans, crs=gdf_ofds_spans.crs)
+    if spans_to_remove_proper:
+        gdf_ofds_spans = gdf_ofds_spans.drop(index=spans_to_remove_proper)
+        if new_spans_proper:
+            new_spans_gdf = gpd.GeoDataFrame(new_spans_proper, crs=gdf_ofds_spans.crs)
             gdf_ofds_spans = pd.concat(
                 [gdf_ofds_spans, new_spans_gdf], ignore_index=True
             )
 
-    # Update node geometries and names
-    for node_id, new_geometry in nodes_to_rename.items():
-        node_idx = gdf_ofds_nodes[gdf_ofds_nodes["id"] == node_id].index[0]
-        gdf_ofds_nodes.at[node_idx, "geometry"] = new_geometry
-        gdf_ofds_nodes.at[node_idx, "name"] = "network fork"
-
-    if nodes_to_rename:
+    if spans_to_remove_proper:
         print(
-            f"Phase 5: Moved and renamed {len(nodes_to_rename)} nodes to fork points, "
-            f"split {len(spans_to_remove)} spans"
+            f"Phase 7: Processed {len(proper_nodes)} proper nodes near spans, "
+            f"split {len(spans_to_remove_proper)} spans"
         )
+    else:
+        print(f"Phase 7: Processed {len(proper_nodes)} proper nodes near spans, no spans split")
     
-    # Write debug files after Phase 5
+    # Write debug files after Phase 7
     if debug_enabled:
-        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase5", debug_output_prefix)
+        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase7", debug_output_prefix)
 
-    # Phase 6: Final Summary
+    # Phase 8: Remove Duplicate Spans
+    print("\nPhase 8: Removing bidirectional duplicate spans...")
+    spans_before_dedup = len(gdf_ofds_spans)
+    
+    # Create a normalized representation: (min(start_id, end_id), max(start_id, end_id))
+    # This treats A->B and B->A as the same connection
+    normalized_connections = {}
+    spans_to_keep = []
+    
+    for index, span in gdf_ofds_spans.iterrows():
+        start_dict = (
+            json.loads(span["start"])
+            if isinstance(span["start"], str) and span["start"] is not None
+            else span["start"]
+        )
+        end_dict = (
+            json.loads(span["end"])
+            if isinstance(span["end"], str) and span["end"] is not None
+            else span["end"]
+        )
+        
+        start_id = None
+        end_id = None
+        
+        if start_dict is not None and isinstance(start_dict, dict):
+            start_id = start_dict.get("id")
+        if end_dict is not None and isinstance(end_dict, dict):
+            end_id = end_dict.get("id")
+        
+        # Skip spans without both start and end nodes
+        if start_id is None or end_id is None:
+            spans_to_keep.append(index)
+            continue
+        
+        # Create normalized connection key (sorted tuple to treat A->B and B->A as same)
+        connection_key = tuple(sorted([start_id, end_id]))
+        
+        # Check if we've seen this connection before
+        if connection_key not in normalized_connections:
+            # First time seeing this connection - keep it
+            normalized_connections[connection_key] = index
+            spans_to_keep.append(index)
+        else:
+            # Duplicate connection (A->B vs B->A) - check if geometries are the same or reversed
+            existing_index = normalized_connections[connection_key]
+            existing_span = gdf_ofds_spans.loc[existing_index]
+            existing_geom = existing_span["geometry"]
+            current_geom = span["geometry"]
+            
+            # Check if geometries are the same or reversed
+            coords_match = (
+                list(existing_geom.coords) == list(current_geom.coords)
+                or list(existing_geom.coords) == list(current_geom.coords)[::-1]
+            )
+            
+            if coords_match:
+                # Duplicate span (same connection, same geometry) - skip it
+                continue
+            else:
+                # Same nodes but different geometry - this might be intentional (different paths)
+                # For now, keep the first one and skip duplicates to avoid bidirectional duplicates
+                # If you need to keep multiple paths between the same nodes, this can be adjusted
+                continue
+    
+    # Filter to keep only non-duplicate spans
+    gdf_ofds_spans = gdf_ofds_spans.loc[spans_to_keep].copy()
+    spans_removed = spans_before_dedup - len(gdf_ofds_spans)
+    
+    if spans_removed > 0:
+        print(f"Phase 8: Removed {spans_removed} bidirectional duplicate spans")
+    else:
+        print("Phase 8: No bidirectional duplicates found")
+    
+    # Write debug files after Phase 8
+    if debug_enabled:
+        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase8", debug_output_prefix)
+
+    # Phase 9: Rename Spans from Nodes
+    if rename_spans_from_nodes:
+        print("\nPhase 9: Renaming spans from node names...")
+        spans_renamed = 0
+        for index, span in gdf_ofds_spans.iterrows():
+            start_dict = (
+                json.loads(span["start"])
+                if isinstance(span["start"], str) and span["start"] is not None
+                else span["start"]
+            )
+            end_dict = (
+                json.loads(span["end"])
+                if isinstance(span["end"], str) and span["end"] is not None
+                else span["end"]
+            )
+            
+            start_name = None
+            end_name = None
+            
+            if start_dict is not None and isinstance(start_dict, dict):
+                start_name = start_dict.get("name")
+            
+            if end_dict is not None and isinstance(end_dict, dict):
+                end_name = end_dict.get("name")
+            
+            # Create new name: "start name - end name"
+            if start_name and end_name:
+                new_name = f"{start_name} - {end_name}"
+                gdf_ofds_spans.at[index, "name"] = new_name
+                spans_renamed += 1
+            elif start_name:
+                # Only start node has a name
+                gdf_ofds_spans.at[index, "name"] = start_name
+                spans_renamed += 1
+            elif end_name:
+                # Only end node has a name
+                gdf_ofds_spans.at[index, "name"] = end_name
+                spans_renamed += 1
+            # If neither has a name, leave the span name unchanged
+        
+        print(f"Phase 9: Renamed {spans_renamed} spans from node names")
+        
+        # Write debug files after Phase 9
+        if debug_enabled:
+            write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase9", debug_output_prefix)
+    
+    # Phase 10: Final Summary
     print(f"\nFinal counts: {len(gdf_ofds_spans)} spans, {len(gdf_ofds_nodes)} nodes")
     
-    # Write debug files after Phase 6 (final)
+    # Write debug files after Phase 10 (final)
     if debug_enabled:
-        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase6_final", debug_output_prefix)
+        write_debug_geojson(gdf_ofds_nodes, gdf_ofds_spans, debug_output_dir, "phase10", debug_output_prefix)
 
     return gdf_ofds_spans, gdf_ofds_nodes
 
@@ -1930,6 +2713,9 @@ def main(network_profile):
         "output_name_prefix": "",
         "threshold_meters": "5000",
         "debug_enabled": "false",
+        "rename_spans_from_nodes": "false",
+        "merge_contiguous_spans": "false",
+        "merge_contiguous_spans_precision": "6",
     }
 
     # Extract all variables with defaults in one go
@@ -1984,18 +2770,33 @@ def main(network_profile):
     # Extract debug_enabled flag
     debug_enabled_str = network_prof.get("debug_enabled", defaults["debug_enabled"]).lower()
     debug_enabled = debug_enabled_str in ("true", "1", "yes", "on")
+    print(f"Debug mode: {debug_enabled} (read from profile as '{network_prof.get('debug_enabled', 'not found')}')")
+    
+    # Extract rename_spans_from_nodes flag
+    rename_spans_from_nodes_str = network_prof.get(
+        "rename_spans_from_nodes", defaults["rename_spans_from_nodes"]
+    ).lower()
+    rename_spans_from_nodes = rename_spans_from_nodes_str in ("true", "1", "yes", "on")
 
     # Extract directory settings
     input_directory = network_prof.get("input_directory", defaults["input_directory"])
     output_directory = network_prof.get(
         "output_directory", defaults["output_directory"]
     )
+    # Use debug_output_directory if specified, otherwise use output_directory
+    debug_output_directory = network_prof.get(
+        "debug_output_directory", output_directory
+    )
+    print(f"Debug output directory: {debug_output_directory} (from profile: '{network_prof.get('debug_output_directory', 'not found')}')")
 
     # Check if directories exist, if not, create them
     if not os.path.exists(input_directory):
         os.makedirs(input_directory)
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
+    if debug_enabled and not os.path.exists(debug_output_directory):
+        os.makedirs(debug_output_directory)
+        print(f"Created debug output directory: {debug_output_directory}")
 
     directory = os.path.join(os.getcwd(), input_directory)
     kml_fullpath = os.path.join(directory, kml_file)
@@ -2059,6 +2860,18 @@ def main(network_profile):
         f"{len(gdf_ofds_nodes)} nodes, min vertices: {min_vert}\n"
     )
 
+    # Optionally merge contiguous spans before adding missing nodes
+    merge_contiguous = network_prof.get("merge_contiguous_spans", defaults["merge_contiguous_spans"]).lower() == "true"
+    if merge_contiguous:
+        merge_precision = int(network_prof.get("merge_contiguous_spans_precision", defaults["merge_contiguous_spans_precision"]))
+        spans_before_merge = len(gdf_spans)
+        print(f"\nMerging contiguous spans (precision: {merge_precision} decimal places)...")
+        print(f"Before merge: {spans_before_merge} spans")
+        gdf_spans = merge_contiguous_spans(gdf_spans, precision=merge_precision)
+        spans_after_merge = len(gdf_spans)
+        spans_merged = spans_before_merge - spans_after_merge
+        print(f"After merge: {spans_after_merge} spans ({spans_merged} spans merged)\n")
+    
     # Check for any spans that do not have a node at the start or end point and add as needed
     nodes_before = len(gdf_ofds_nodes)
     gdf_ofds_nodes, gdf_auto_gen_nodes = add_missing_nodes(
@@ -2116,8 +2929,9 @@ def main(network_profile):
         gdf_ofds_spans,
         threshold_meters,
         debug_enabled=debug_enabled,
-        debug_output_dir=output_directory,
+        debug_output_dir=debug_output_directory,
         debug_output_prefix=output_name_prefix,
+        rename_spans_from_nodes=rename_spans_from_nodes,
     )
     spans_after = len(gdf_ofds_spans)
     nodes_after = len(gdf_ofds_nodes)
