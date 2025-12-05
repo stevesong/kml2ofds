@@ -1,6 +1,6 @@
 [DEFAULT]
 network_name = Liquid Telecom Zimbabwe
-kml_file_name = Liquid_Zimbabwe.kml
+kml_file_name = Liquid_Zimbabwe_ofds.kml
 output_name_prefix = LIQ-ZIM
 network_id = 
 physicalInfrastructureProvider_name = Liquid Intelligent Technologies
@@ -12,7 +12,9 @@ network_links = https://raw.githubusercontent.com/Open-Telecoms-Data/open-fibre-
 ignore_placemarks = 
 # ignore_placemarks = 
 # Threshold in meters for consolidating auto-generated nodes (default: 5000)
-threshold_meters = 1000
+threshold_meters = 4500
+rename_spans_from_nodes = true
+
 
 [DIRECTORY]
 input_directory = input/
